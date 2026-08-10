@@ -14,8 +14,8 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@drawable/ic_launcher"
-        android:banner="@drawable/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher">
 
         <!-- Launcher entry point: tap the app icon, get a grid of channels. -->
         <activity
