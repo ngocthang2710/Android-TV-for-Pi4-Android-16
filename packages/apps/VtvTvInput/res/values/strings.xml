@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name" translatable="false">VTV</string>
+    <string name="setup_done">Đã thêm %1$d kênh VTV</string>
+    <string name="channel_unavailable">Không phát được kênh %1$s</string>
+</resources>

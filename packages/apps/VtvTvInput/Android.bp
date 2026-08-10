@@ -1,0 +1,24 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+android_app {
+    name: "VtvTvInput",
+
+    srcs: ["src/**/*.java"],
+    resource_dirs: ["res"],
+    manifest: "AndroidManifest.xml",
+
+    sdk_version: "current",
+    target_sdk_version: "current",
+
+    // Preinstalled on the Android TV product only (see aosp_rpi4_tv.mk); not
+    // needed on aosp_rpi4_car. Regular (non-privileged) app: TvInputService
+    // binding and TvContract EPG read/write don't require priv-app status,
+    // only the manifest declarations below.
+    product_specific: true,
+
+    optimize: {
+        enabled: false,
+    },
+}

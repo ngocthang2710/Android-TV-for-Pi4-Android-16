@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher entry point: a grid of VTV channel tiles, tap one to watch it.
+  Deliberately a plain GridLayout with tiles added as direct children in
+  code, NOT a GridView/AdapterView: AbsListView intercepts
+  DPAD_CENTER/ENTER at the list level for its own selection model, which
+  fought with per-tile focus/click handling here. Direct children keep
+  D-pad OK presses on the standard View focus to performClick() path.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#101418">
+
+    <GridLayout
+        android:id="@+id/channel_grid"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:columnCount="3"
+        android:padding="32dp" />
+</ScrollView>

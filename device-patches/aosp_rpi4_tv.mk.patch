@@ -1,8 +1,24 @@
 diff --git a/aosp_rpi4_tv.mk b/aosp_rpi4_tv.mk
-index 5939069..7211c11 100644
+index 5939069..1fda406 100644
 --- a/aosp_rpi4_tv.mk
 +++ b/aosp_rpi4_tv.mk
-@@ -44,6 +44,12 @@ PRODUCT_PACKAGES += \
+@@ -23,6 +23,15 @@ PRODUCT_PACKAGES += \
+     TvSampleLeanbackLauncher \
+     TvSettingsTwoPanel
+ 
++# Live Channels app (hosts TvInputServices' channels/EPG). Non-passthrough
++# variant: this device has no HDMI-input hardware to pass through.
++PRODUCT_PACKAGES += \
++    LiveTvNonPassthrough
++
++# VTV live channels (HLS) TvInputService, shows up in Live Channels.
++PRODUCT_PACKAGES += \
++    VtvTvInput
++
+ # Bluetooth
+ PRODUCT_VENDOR_PROPERTIES += \
+     bluetooth.device.class_of_device=34,4,36
+@@ -44,6 +53,12 @@ PRODUCT_PACKAGES += \
      SettingsProviderTvRpiOverlay \
      WifiRpiOverlay
  
