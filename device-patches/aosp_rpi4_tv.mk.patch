@@ -1,0 +1,17 @@
+diff --git a/aosp_rpi4_tv.mk b/aosp_rpi4_tv.mk
+index 5939069..7211c11 100644
+--- a/aosp_rpi4_tv.mk
++++ b/aosp_rpi4_tv.mk
+@@ -44,6 +44,12 @@ PRODUCT_PACKAGES += \
+     SettingsProviderTvRpiOverlay \
+     WifiRpiOverlay
+ 
++# Silently grant TvSampleLeanbackLauncher the location permission it needs
++# to read the connected Wi-Fi SSID (see AndroidManifest.xml comment in
++# device/google/atv/TvSampleLeanbackLauncher for why it's required).
++PRODUCT_PACKAGES += \
++    default-permissions-rpi4-tv.xml
++
+ # Device identifier. This must come after all inclusions.
+ PRODUCT_DEVICE := rpi4
+ PRODUCT_NAME := aosp_rpi4_tv

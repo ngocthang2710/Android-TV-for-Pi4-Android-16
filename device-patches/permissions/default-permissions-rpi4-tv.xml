@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ SPDX-License-Identifier: Apache-2.0
+  -->
+
+<!--
+    Silently pre-grants runtime permissions that a preloaded system app needs
+    to function out-of-the-box on a remote-less TV (no UI to walk the user
+    through the normal permission dialog).
+-->
+<exceptions>
+
+    <!--
+        TvSampleLeanbackLauncher reads WifiInfo.getSSID() to show the
+        connected network name/icon on the home screen. Without
+        ACCESS_FINE_LOCATION granted (and Location enabled in Settings),
+        the platform redacts the SSID and returns "<unknown ssid>" even
+        though the device is actually connected.
+    -->
+    <exception package="com.example.sampleleanbacklauncher">
+        <permission name="android.permission.ACCESS_FINE_LOCATION" fixed="false"/>
+    </exception>
+
+</exceptions>

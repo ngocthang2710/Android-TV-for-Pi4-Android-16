@@ -1,0 +1,16 @@
+diff --git a/TvSampleLeanbackLauncher/AndroidManifest.xml b/TvSampleLeanbackLauncher/AndroidManifest.xml
+index 070967b..728fb4d 100644
+--- a/TvSampleLeanbackLauncher/AndroidManifest.xml
++++ b/TvSampleLeanbackLauncher/AndroidManifest.xml
+@@ -21,6 +21,11 @@
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_NOTIFICATIONS" />
++    <!-- Required for WifiInfo.getSSID() to return the real SSID instead of
++         "<unknown ssid>" when drawing the network entry's label. Granted
++         silently via a device-level default-permissions exception since this
++         launcher has no UI to prompt the user through the runtime dialog. -->
++    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+ 
+     <uses-feature android:name="android.software.leanback" android:required="true" />
+ 

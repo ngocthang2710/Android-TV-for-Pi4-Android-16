@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+
+prebuilt_etc {
+    name: "default-permissions-rpi4-tv.xml",
+    src: "default-permissions-rpi4-tv.xml",
+    vendor: true,
+    relative_install_path: "default-permissions",
+}
