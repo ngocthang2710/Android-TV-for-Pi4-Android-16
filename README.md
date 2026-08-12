@@ -34,6 +34,8 @@ product/form-factor.
   build has no GMS/Play Services to run the real app. See below.
 - Spotify, added to the app row the same way. Rougher than YouTube --
   Spotify has no TV-remote-oriented web client, see below for the caveats.
+- "CH Play" (Google Play Store), added to the app row -- browse-only, see
+  below for why it can't actually install anything.
 
 ## Feature: home screen re-skin (Google TV Home style)
 
@@ -214,6 +216,41 @@ hamburger menu and login form are reachable and functional, including
 on-screen-keyboard text entry into the email field. **Not yet verified**:
 an actual login with a real account, and audio playback after signing in
 -- left for whoever has a Spotify account to test next.
+
+## Feature: "CH Play" (Google Play Store, browse-only)
+
+### What it does
+Adds a "CH Play" icon to the app row (the Vietnamese colloquial name for
+Google Play Store, used here per explicit user request). Same reasoning
+as YouTube/Spotify: no GMS on this AOSP build, so the real Play Store app
+-- itself part of GMS -- can't be installed, and there's no Play Store
+backend for it to talk to even if it were. `packages/apps/PlayStoreTv` is
+a WebView wrapper around `https://play.google.com/store`.
+
+This one is explicitly **browse-only**: reading app/game listings, search,
+and ratings all work over the real Play Store website, but tapping
+"Install" cannot actually install anything -- that needs a real signed-in
+Play Store client talking to Google's install backend, which doesn't
+exist on this build. It exists to fill out the app row with a working
+browse view, not to be a functional app store.
+
+| | |
+|---|---|
+| ![Launcher with CH Play icon](docs/screenshots/playstore-01-launcher-icon.png) | Same `LEANBACK_LAUNCHER` mechanism as YouTube/Spotify -- no launcher changes needed. |
+| ![Browsing Google Play](docs/screenshots/playstore-02-browse.png) | The real play.google.com/store storefront: popular games, top charts, device-type filter (Phone/TV/Watch/...), search. |
+
+### Notable differences from YouTubeTv/SpotifyTv
+Otherwise identical: same predictive-back opt-out, same force-navigate-
+to-home-on-BACK + Escape-key-fallback + double-back-to-exit design, and
+the same path-based `isHomeUrl()` as SpotifyTv (play.google.com uses
+normal path routing -- `/store/apps/details`, `/store/search`, etc. --
+not hash-based routing).
+
+### Result (verified on real hardware)
+The real storefront loads and is browsable (popular games, top charts,
+category/device filters); no crash. Icon shows up correctly in the app
+row. **Not tested**: search and individual app/game detail pages beyond
+the storefront itself.
 
 ## Feature: VTV live TV channels
 
@@ -403,7 +440,7 @@ be split as one narrow `AndroidManifest.xml.patch`; consolidated into a
 single whole-directory patch once the re-skin touched far more than the
 manifest.
 
-### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/`, `packages/apps/SpotifyTv/` -- new apps; the path in this repo *is* the path each installs to
+### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/`, `packages/apps/SpotifyTv/`, `packages/apps/PlayStoreTv/` -- new apps; the path in this repo *is* the path each installs to
 
 Plain file copies (`cp -r`, not patches) of each whole Soong module:
 `Android.bp`, `AndroidManifest.xml`, `res/`, `src/`.
@@ -421,6 +458,7 @@ git apply <THIS_REPO>/device-patches/TvSampleLeanbackLauncher.patch
 cp -r <THIS_REPO>/packages/apps/VtvTvInput <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/YouTubeTv <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/SpotifyTv <AOSP_ROOT>/packages/apps/
+cp -r <THIS_REPO>/packages/apps/PlayStoreTv <AOSP_ROOT>/packages/apps/
 
 cd <AOSP_ROOT>
 source build/envsetup.sh
@@ -428,10 +466,10 @@ lunch aosp_rpi4_tv bp4a userdebug
 m systemimage vendorimage   # or just `m` for a full build
 ```
 
-Product packages `LiveTvNonPassthrough`, `VtvTvInput`, `YouTubeTv`, and
-`SpotifyTv` are already added to `PRODUCT_PACKAGES` by the
-`aosp_rpi4_tv.mk.patch` above -- no separate `lunch`/menuconfig step needed
-for them.
+Product packages `LiveTvNonPassthrough`, `VtvTvInput`, `YouTubeTv`,
+`SpotifyTv`, and `PlayStoreTv` are already added to `PRODUCT_PACKAGES` by
+the `aosp_rpi4_tv.mk.patch` above -- no separate `lunch`/menuconfig step
+needed for them.
 
 ## License
 

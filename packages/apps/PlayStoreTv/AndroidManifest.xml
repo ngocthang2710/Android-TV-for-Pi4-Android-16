@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  "CH Play" for this launcher's "Your Apps" row (Vietnamese colloquial
+  name for Google Play Store, used here per explicit user request). Same
+  situation as YouTubeTv/SpotifyTv: no GMS/Play Services on this AOSP
+  build, so the real Play Store app, which is itself part of GMS, can't
+  be installed here, and there is no Play Store backend for it to talk to
+  even if it were. This is a thin WebView wrapper around
+  https://play.google.com/store: browsing/searching/reading app listings
+  works, but tapping "Install" cannot actually install anything (that
+  needs a real signed-in Play Store client talking to Google's install
+  backend, which doesn't exist on this build); it exists to fill out the
+  app row with a working browse view, not to be a real app store.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rpi4tv.playstoretv">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
