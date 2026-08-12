@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Spotify for this launcher's "Your Apps" row. Same situation as
+  YouTubeTv (see its AndroidManifest.xml): no GMS/Play Services on this
+  AOSP build, so the real closed-source Spotify app can't be built or
+  installed here. This is a thin WebView wrapper around
+  https://open.spotify.com; unlike YouTube, Spotify has no dedicated
+  TV-remote-oriented web client, so this is expected to be rougher than
+  YouTubeTv (mouse/keyboard-oriented UI, "Sign in with Google/Facebook"
+  likely blocked inside an embedded WebView; Spotify's own email/
+  password login should still work). User explicitly asked for this on a
+  personal, non-distributed device knowing that tradeoff.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rpi4tv.spotifytv">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -32,6 +32,8 @@ product/form-factor.
   focus-driven hero background, a single circular app-icon row). See below.
 - YouTube, added to the app row -- a WebView wrapper, since this AOSP
   build has no GMS/Play Services to run the real app. See below.
+- Spotify, added to the app row the same way. Rougher than YouTube --
+  Spotify has no TV-remote-oriented web client, see below for the caveats.
 
 ## Feature: home screen re-skin (Google TV Home style)
 
@@ -168,6 +170,49 @@ with waits up to 10s before checking): 1 press reliably returns to
 YouTube's own home screen, a 2nd press reliably exits to the launcher --
 confirmed via `dumpsys window`'s `mCurrentFocus` at each step, not just a
 screenshot glance.
+
+## Feature: Spotify
+
+### What it does
+Adds a "Spotify" icon to the app row, same reasoning as YouTube: no GMS
+on this AOSP build, so the real app isn't buildable/installable here.
+`packages/apps/SpotifyTv` is a WebView wrapper around
+`https://open.spotify.com`. Unlike YouTube, **Spotify has no dedicated
+TV-remote-oriented web client** -- this is expected to be, and is, rougher
+than YouTubeTv: the web player is built for mouse/keyboard/touch, and
+"Sign in with Google/Facebook" is likely blocked inside an embedded
+WebView (Google's OAuth explicitly detects and rejects the WebView user
+agent). Spotify's own direct email/password login is expected to reliably
+work.
+
+| | |
+|---|---|
+| ![Launcher with Spotify icon](docs/screenshots/spotify-01-launcher-icon.png) | Both YouTube and Spotify in the app row -- same `LEANBACK_LAUNCHER` mechanism, no launcher changes for either. |
+| ![Spotify landing page](docs/screenshots/spotify-02-landing.png) | open.spotify.com's real logged-out landing page, region-appropriate trending content. |
+| ![Spotify login form](docs/screenshots/spotify-03-login.png) | Reached via the hamburger menu -> "Log in"; the real login form renders correctly, including "Continue with phone number"/"Continue with Google". |
+| ![On-screen keyboard input](docs/screenshots/spotify-04-keyboard-input.png) | Typing into the email field works -- the on-screen keyboard (IME) pops up and input lands correctly. |
+
+### Notable differences from YouTubeTv
+- **User agent**: strips `"; wv"` (the literal WebView marker Chrome's
+  default UA includes) rather than appending a TV hint like YouTubeTv
+  does -- Spotify has no alternate TV site to branch to via UA, so the
+  only lever here is making a "Sign in with Google" attempt look less
+  like an embedded WebView to Google's own OAuth check.
+- **BACK's `isHomeUrl()` check is path-based, not hash-based**:
+  open.spotify.com uses normal path routing (`/search`, `/playlist/xyz`),
+  not youtube.com/tv's hash fragments (`#/watch?...`), so home is
+  identified by an empty/`/` URL path instead of an empty/`/` hash.
+- Reuses the exact same BACK-handling design as YouTubeTv otherwise
+  (predictive-back opt-out, force-navigate-to-home on BACK, Escape-key
+  fallback, double-back-to-exit) rather than rediscovering those bugs
+  again here.
+
+### Result (verified on real hardware)
+Landing page loads with real, region-appropriate trending content; the
+hamburger menu and login form are reachable and functional, including
+on-screen-keyboard text entry into the email field. **Not yet verified**:
+an actual login with a real account, and audio playback after signing in
+-- left for whoever has a Spotify account to test next.
 
 ## Feature: VTV live TV channels
 
@@ -357,7 +402,7 @@ be split as one narrow `AndroidManifest.xml.patch`; consolidated into a
 single whole-directory patch once the re-skin touched far more than the
 manifest.
 
-### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/` -- new apps; the path in this repo *is* the path each installs to
+### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/`, `packages/apps/SpotifyTv/` -- new apps; the path in this repo *is* the path each installs to
 
 Plain file copies (`cp -r`, not patches) of each whole Soong module:
 `Android.bp`, `AndroidManifest.xml`, `res/`, `src/`.
@@ -374,6 +419,7 @@ git apply <THIS_REPO>/device-patches/TvSampleLeanbackLauncher.patch
 
 cp -r <THIS_REPO>/packages/apps/VtvTvInput <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/YouTubeTv <AOSP_ROOT>/packages/apps/
+cp -r <THIS_REPO>/packages/apps/SpotifyTv <AOSP_ROOT>/packages/apps/
 
 cd <AOSP_ROOT>
 source build/envsetup.sh
@@ -381,9 +427,10 @@ lunch aosp_rpi4_tv bp4a userdebug
 m systemimage vendorimage   # or just `m` for a full build
 ```
 
-Product packages `LiveTvNonPassthrough`, `VtvTvInput`, and `YouTubeTv` are
-already added to `PRODUCT_PACKAGES` by the `aosp_rpi4_tv.mk.patch` above --
-no separate `lunch`/menuconfig step needed for them.
+Product packages `LiveTvNonPassthrough`, `VtvTvInput`, `YouTubeTv`, and
+`SpotifyTv` are already added to `PRODUCT_PACKAGES` by the
+`aosp_rpi4_tv.mk.patch` above -- no separate `lunch`/menuconfig step needed
+for them.
 
 ## License
 
