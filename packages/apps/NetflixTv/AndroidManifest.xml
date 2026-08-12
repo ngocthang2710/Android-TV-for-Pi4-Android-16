@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Netflix for this launcher's "Your Apps" row. Same situation as
+  YouTubeTv/SpotifyTv/PlayStoreTv: no GMS/Play Services on this AOSP
+  build, so the real closed-source Netflix app (which also needs Google
+  TV/Android TV certification) can't be built or installed here. This is
+  a thin WebView wrapper around https://www.netflix.com instead.
+
+  Higher risk than Spotify/CH Play: Netflix's web player needs Widevine
+  DRM (L1/L3) for actual video playback via EME, and this AOSP build has
+  no device certification and likely no full Widevine CDM. Browsing/
+  login is expected to work; pressing Play on a title may fail with a
+  "device not supported"-style error instead of actually playing; user
+  explicitly asked to build this and test on real hardware to see what
+  actually happens, rather than assume.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rpi4tv.netflixtv">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

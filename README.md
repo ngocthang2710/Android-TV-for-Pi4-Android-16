@@ -36,6 +36,10 @@ product/form-factor.
   Spotify has no TV-remote-oriented web client, see below for the caveats.
 - "CH Play" (Google Play Store), added to the app row -- browse-only, see
   below for why it can't actually install anything.
+- Netflix, added to the app row -- browsing/login work, but playback
+  doesn't: confirmed this device has no Widevine DRM plugin at all
+  (`libdrmclearkeyplugin.so` only, no `libwvdrmengine.so`), which Netflix
+  requires. See below.
 
 ## Feature: home screen re-skin (Google TV Home style)
 
@@ -252,6 +256,55 @@ category/device filters); no crash. Icon shows up correctly in the app
 row. **Not tested**: search and individual app/game detail pages beyond
 the storefront itself.
 
+## Feature: Netflix (browse/login only -- playback confirmed not to work)
+
+### What it does
+Adds a "Netflix" icon to the app row, same WebView-wrapper approach as
+YouTube/Spotify/CH Play: no GMS on this AOSP build, so the real
+closed-source Netflix app (also needs Android TV certification) can't be
+installed. `packages/apps/NetflixTv` wraps `https://www.netflix.com`.
+
+This one was known going in to be higher-risk than Spotify/CH Play:
+Netflix's web player needs Widevine DRM (L1/L3) for actual video playback
+via EME, and an uncertified AOSP build typically has no full Widevine
+CDM. Built and tested anyway, per explicit user request, to get a real
+answer instead of assuming.
+
+| | |
+|---|---|
+| ![Launcher with Netflix icon](docs/screenshots/netflix-01-launcher-icon.png) | Same `LEANBACK_LAUNCHER` mechanism as the other WebView apps. |
+| ![Netflix landing page](docs/screenshots/netflix-02-landing.png) | The real netflix.com landing page: background art, region pricing (VND), "Sign In". |
+| ![Netflix login form](docs/screenshots/netflix-03-login.png) | The real sign-in form loads and is reachable. |
+| ![On-screen keyboard input](docs/screenshots/netflix-04-keyboard-input.png) | Typing into the email field works -- on-screen keyboard pops up, input lands correctly. |
+
+### The DRM question, answered with evidence instead of guessed
+No Netflix account was available to actually finish signing in and press
+Play, so playback itself wasn't directly observed -- but the underlying
+question ("does this device even have the DRM Netflix requires") has a
+definitive answer, checked directly on-device rather than assumed:
+
+```
+$ adb shell find /vendor /system -iname '*widevine*' -o -iname '*drm*.so'
+/vendor/lib64/mediadrm/libdrmclearkeyplugin.so
+/system/lib64/android.hardware.drm@1.0.so
+...framework/HAL scaffolding only...
+```
+
+Only `libdrmclearkeyplugin.so` (ClearKey -- unencrypted/test-only DRM) is
+present. There is no `libwvdrmengine.so` (the real Widevine CDM plugin)
+anywhere on the device. Netflix requires Widevine and does not accept
+ClearKey, so **video playback cannot work on this build, full stop** --
+not a bug in `NetflixTv` to fix, a real hardware/build certification gap
+(Widevine provisioning requires a Google device certification this AOSP
+build doesn't have).
+
+### Result (verified on real hardware)
+Landing page and login form load and render correctly, including
+on-screen-keyboard text entry; no crash. Kept in the app row as a
+browse/login-capable app with this limitation clearly documented, rather
+than silently shipping something that looks like it should play video but
+can't.
+
 ## Feature: VTV live TV channels
 
 ### What it does
@@ -440,7 +493,7 @@ be split as one narrow `AndroidManifest.xml.patch`; consolidated into a
 single whole-directory patch once the re-skin touched far more than the
 manifest.
 
-### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/`, `packages/apps/SpotifyTv/`, `packages/apps/PlayStoreTv/` -- new apps; the path in this repo *is* the path each installs to
+### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/`, `packages/apps/SpotifyTv/`, `packages/apps/PlayStoreTv/`, `packages/apps/NetflixTv/` -- new apps; the path in this repo *is* the path each installs to
 
 Plain file copies (`cp -r`, not patches) of each whole Soong module:
 `Android.bp`, `AndroidManifest.xml`, `res/`, `src/`.
@@ -459,6 +512,7 @@ cp -r <THIS_REPO>/packages/apps/VtvTvInput <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/YouTubeTv <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/SpotifyTv <AOSP_ROOT>/packages/apps/
 cp -r <THIS_REPO>/packages/apps/PlayStoreTv <AOSP_ROOT>/packages/apps/
+cp -r <THIS_REPO>/packages/apps/NetflixTv <AOSP_ROOT>/packages/apps/
 
 cd <AOSP_ROOT>
 source build/envsetup.sh
@@ -467,9 +521,9 @@ m systemimage vendorimage   # or just `m` for a full build
 ```
 
 Product packages `LiveTvNonPassthrough`, `VtvTvInput`, `YouTubeTv`,
-`SpotifyTv`, and `PlayStoreTv` are already added to `PRODUCT_PACKAGES` by
-the `aosp_rpi4_tv.mk.patch` above -- no separate `lunch`/menuconfig step
-needed for them.
+`SpotifyTv`, `PlayStoreTv`, and `NetflixTv` are already added to
+`PRODUCT_PACKAGES` by the `aosp_rpi4_tv.mk.patch` above -- no separate
+`lunch`/menuconfig step needed for them.
 
 ## License
 

@@ -1,0 +1,23 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+android_app {
+    name: "NetflixTv",
+
+    srcs: ["src/**/*.java"],
+    resource_dirs: ["res"],
+    manifest: "AndroidManifest.xml",
+
+    sdk_version: "current",
+    target_sdk_version: "current",
+
+    // Preinstalled on the Android TV product only (see aosp_rpi4_tv.mk).
+    // Regular (non-privileged) app, same reasoning as YouTubeTv/SpotifyTv/
+    // PlayStoreTv.
+    product_specific: true,
+
+    optimize: {
+        enabled: false,
+    },
+}
