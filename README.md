@@ -6,8 +6,9 @@ Patch set for **AOSP's `aosp_rpi4_tv` product** -- the stock Android TV
 (`device/google/atv`). This repo does **not** carry a full device tree copy;
 it tracks the local fixes/customizations applied on top of a stock
 `android-16.0` checkout, as patches against the exact AOSP paths they touch,
-plus one wholly new app (`packages/apps/VtvTvInput`) kept as a plain file
-copy since there's no upstream version of it to diff against.
+plus wholly new apps (`packages/apps/VtvTvInput`, and the app-row entries
+added later) kept as plain file copies since there's no upstream version of
+them to diff against.
 
 This is a sibling project to
 [Android-Auto-for-Pi4-Android-16](../Android-Auto-for-Pi4-Android-16) (the
@@ -27,6 +28,85 @@ product/form-factor.
 - Live TV: the free-to-air VTV1-9 national channels, watchable two ways --
   as regular channels inside AOSP's stock Live Channels app, and via a
   small standalone channel-picker app. See below.
+- Home screen re-skinned to a Google TV Home style layout (top nav bar,
+  focus-driven hero background, a single circular app-icon row). See below.
+
+## Feature: home screen re-skin (Google TV Home style)
+
+### What it does
+Re-skins the stock `TvSampleLeanbackLauncher` home screen to look and
+behave like Google TV Home, using only real on-device data (installed
+apps, their icons/banners) -- not a pixel-perfect clone of the
+closed-source Google TV Home app, and no fabricated "Top picks for you"
+content (that would need a real recommendation source publishing
+`TvProvider` `PreviewProgram`s, which is future work, not this repo).
+
+- **Top bar**, fixed above everything: an account-avatar stand-in + Search
+  icon + Home/Live/Apps tabs in one translucent pill capsule on the left
+  (focus moves a solid white pill between them, not a fixed "current
+  page" indicator); a second capsule on the right with
+  assistant/home/Settings icons; a clock + brand text on the far right.
+  "Live" launches the real Live Channels activity
+  (confirmed via `adb shell cmd package query-activities`, not guessed).
+- **Hero region**: a full-screen ambient-blurred backdrop
+  (`RenderEffect.createBlurEffect`, API 31+) that tracks whichever app
+  icon currently has D-pad focus, with its label/banner as the title.
+- **App row**: every launchable app (regular apps + Settings/Network/
+  Notifications) merged into one circular icon row pinned to the bottom
+  of the screen, de-duplicated by target component (Android TV Settings
+  legitimately declares itself as both an app and a settings shortcut).
+
+| | |
+|---|---|
+| ![Home screen](docs/screenshots/home-ui-final.png) | Hero background follows D-pad focus; one circular app row at the bottom, matching a real Google TV Home screenshot's layout rather than the stock launcher's stacked square-tile rows. |
+
+### Real bugs hit building this, and their fixes
+
+**1. Icons randomly vanished after launching any app and returning home.**
+Root cause: `LaunchItem.areContentsTheSame()` (a `SortedList` diff
+callback) compared `Drawable` icons with `Objects.equals()`, which is
+always `false` since `Drawable` doesn't override `equals()`. Every list
+rescan (triggered on every app launch) therefore looked like every item
+"changed", triggering `RecyclerView`'s default cross-fade animation --
+which got cut off mid-flight when the Activity paused because an app was
+launching, leaving the icon's alpha stuck near 0. Fixed by dropping the
+`Drawable` comparison from `areContentsTheSame()` and defensively
+resetting alpha/scale in `AppViewHolder.bind()` regardless of what an
+in-flight animator left behind.
+
+**2. Two-layer background seam.** The first blurred-backdrop
+implementation kept a sharp, hero-region-only image layered separately
+from a full-screen blurred one behind it, producing a visible hard seam
+where the sharp box ended. Fixed by removing the hero region's own image
+entirely -- there is now exactly one full-screen `ImageView`, blurred, with
+the hero title/subtitle just positioned as text over it.
+
+**3. D-pad `DPAD_CENTER` focus didn't visually indicate on 4 of the top
+bar's buttons** (Search/assistant/home-button/Settings): they only had the
+default `?android:attr/selectableItemBackground` ripple, invisible on a
+real TV remote. Fixed by giving them the same white-circle-on-focus
+treatment the app tiles already had, reusing the same drawable so the
+focus language is consistent everywhere on screen.
+
+**4. Proportions can't be eyeballed from a screenshot at face value.**
+Asked to match a reference screenshot's proportions, sizes were measured
+as **fractions of width/height** (not absolute px, since a shared
+screenshot's native resolution is unknown) and re-applied to this
+device's real 1920x1080 screen. That process caught a real layout bug,
+not just a sizing one: the gap between the two top-bar button groups used
+a flexible `layout_weight="1"` spacer, identical to the one before the
+clock -- two equal flexible gaps centered the right button group in the
+middle of the bar instead of tight against the left group like the
+reference. Fixed with a fixed-width spacer between the groups, leaving
+only the clock-side gap flexible.
+
+### Result (verified on real hardware)
+Screenshots + `adb shell uiautomator dump` D-pad focus traces on the real
+device, not just build success, across every round of changes: hero
+background updates on focus change with no seam, all top bar buttons show
+a clear focus indicator, the app row never loses an icon after returning
+from a launched app, and everything fits one 1920x1080 screen with no
+scrolling.
 
 ## Feature: VTV live TV channels
 
@@ -205,11 +285,16 @@ each of those actually applies).
 | `device-patches/permissions/Android.bp` | `device/brcm/rpi4/permissions/Android.bp` (new file) |
 | `device-patches/permissions/default-permissions-rpi4-tv.xml` | `device/brcm/rpi4/permissions/default-permissions-rpi4-tv.xml` (new file) |
 
-### `device-patches/TvSampleLeanbackLauncher/` -- against `device/google/atv/TvSampleLeanbackLauncher/`
+### `device-patches/TvSampleLeanbackLauncher.patch` -- against `device/google/atv/TvSampleLeanbackLauncher/`
 
-| In this repo | Applies to |
-|---|---|
-| `device-patches/TvSampleLeanbackLauncher/AndroidManifest.xml.patch` | `git apply` inside `device/google/atv/TvSampleLeanbackLauncher/`, patches `src/main/AndroidManifest.xml` (Wi-Fi SSID fix + the launcher `<queries>` fix, both folded into one patch) |
+One consolidated patch (`git apply` inside
+`device/google/atv/TvSampleLeanbackLauncher/`) covering every change to the
+stock launcher: the Wi-Fi SSID fix, the launcher `<queries>` fix, and the
+whole Google-TV-Home-style re-skin (new top bar/hero/app-row layouts and
+drawables, `LauncherActivity`/`AppFragment`/`LaunchItem` changes). Used to
+be split as one narrow `AndroidManifest.xml.patch`; consolidated into a
+single whole-directory patch once the re-skin touched far more than the
+manifest.
 
 ### `packages/apps/VtvTvInput/` -- new app; the path in this repo *is* the path it installs to
 
@@ -224,7 +309,7 @@ git apply <THIS_REPO>/device-patches/aosp_rpi4_tv.mk.patch
 cp -r <THIS_REPO>/device-patches/permissions .
 
 cd <AOSP_ROOT>/device/google/atv/TvSampleLeanbackLauncher
-git apply <THIS_REPO>/device-patches/TvSampleLeanbackLauncher/AndroidManifest.xml.patch
+git apply <THIS_REPO>/device-patches/TvSampleLeanbackLauncher.patch
 
 cp -r <THIS_REPO>/packages/apps/VtvTvInput <AOSP_ROOT>/packages/apps/
 

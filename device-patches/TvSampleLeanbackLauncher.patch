@@ -1,0 +1,1920 @@
+diff --git a/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml b/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
+index 070967b..24ac12e 100644
+--- a/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
++++ b/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
+@@ -21,9 +21,40 @@
+     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.ACCESS_NOTIFICATIONS" />
++    <!-- Required for WifiInfo.getSSID() to return the real SSID instead of
++         "<unknown ssid>" when drawing the network entry's label. Granted
++         silently via a device-level default-permissions exception since this
++         launcher has no UI to prompt the user through the runtime dialog. -->
++    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+ 
+     <uses-feature android:name="android.software.leanback" android:required="true" />
+ 
++    <!--
++      Without this, package-visibility filtering (API 30+) hides every app
++      this launcher didn't already have an "interaction" with, so
++      LaunchItemsManager#updateAppList()/updateSettingsList() silently
++      return nothing for newly-added apps like Live Channels or new TV
++      inputs (adb: `dumpsys package <this> | grep -A5 Queries` showed them
++      absent from "queryable via interaction" even though the launcher IS
++      the resolved HOME app; there's no automatic Home-role exemption in
++      this AOSP version. Declare the exact intents LaunchItemsManager
++      queries so it can actually see them.
++    -->
++    <queries>
++        <intent>
++            <action android:name="android.intent.action.MAIN" />
++            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
++        </intent>
++        <intent>
++            <action android:name="android.intent.action.MAIN" />
++            <category android:name="android.intent.category.LEANBACK_SETTINGS" />
++        </intent>
++        <intent>
++            <action android:name="android.settings.WIFI_SETTINGS" />
++            <category android:name="android.intent.category.LEANBACK_SETTINGS" />
++        </intent>
++    </queries>
++
+     <application
+         android:allowBackup="true"
+         android:icon="@mipmap/ic_launcher"
+diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
+index b14ac59..84301f9 100644
+--- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
++++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
+@@ -17,42 +17,258 @@
+ package com.example.sampleleanbacklauncher;
+ 
+ import android.app.Activity;
++import android.content.ActivityNotFoundException;
++import android.content.ComponentName;
+ import android.content.Intent;
++import android.graphics.RenderEffect;
++import android.graphics.Shader;
++import android.graphics.Typeface;
++import android.graphics.drawable.Drawable;
++import android.os.Build;
+ import android.os.Bundle;
++import android.provider.Settings;
++import android.util.Log;
++import android.view.View;
++import android.widget.ImageView;
++import android.widget.TextView;
++import android.widget.Toast;
+ 
+ import com.example.sampleleanbacklauncher.apps.AppFragment;
+-import com.example.sampleleanbacklauncher.search.SearchFragment;
++import com.example.sampleleanbacklauncher.apps.LaunchItem;
++
++public class LauncherActivity extends Activity implements AppFragment.OnItemFocusedListener {
++    private static final String TAG = "LauncherActivity";
++
++    // Full-screen ambient backdrop blur radius (px). RenderEffect, not a
++    // software blur library: available unconditionally on this API level,
++    // no new build dependency.
++    private static final float BACKDROP_BLUR_RADIUS_PX = 80f;
+ 
+-public class LauncherActivity extends Activity {
+     private SystemUpdateChecker mSystemUpdateChecker;
+     private static final int SYSTEM_UPDATE_CHECKER_REQUEST = 0;
+ 
++    private ImageView mHeroFallbackIcon;
++    private TextView mHeroTitle;
++    private TextView mHeroSubtitle;
++    private ImageView mHeroBackdropImage;
++    private View mHeroBackdropScrim;
++    private View mHeroBackdropScrimHorizontal;
++
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+ 
+         setContentView(R.layout.launcher);
+ 
++        mHeroFallbackIcon = findViewById(R.id.hero_fallback_icon);
++        mHeroTitle = findViewById(R.id.hero_title);
++        mHeroSubtitle = findViewById(R.id.hero_subtitle);
++        mHeroBackdropImage = findViewById(R.id.hero_backdrop_image);
++        mHeroBackdropScrim = findViewById(R.id.hero_backdrop_scrim);
++        mHeroBackdropScrimHorizontal = findViewById(R.id.hero_backdrop_scrim_horizontal);
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++            mHeroBackdropImage.setRenderEffect(RenderEffect.createBlurEffect(
++                    BACKDROP_BLUR_RADIUS_PX, BACKDROP_BLUR_RADIUS_PX, Shader.TileMode.CLAMP));
++        }
++        // Default state before any row reports a focused item. Shown until
++        // onItemFocused() below fires from the row.
++        mHeroTitle.setText(R.string.app_name);
++        mHeroFallbackIcon.setImageResource(R.mipmap.ic_launcher);
++
++        setUpTopBar();
++
+         if (savedInstanceState == null) {
++            // Two circular rows: "Your Apps" (real installed apps + games,
++            // games bucket is empty on this device -- no isGame-flagged
++            // app installed) and "Settings" (Settings/Network/
++            // Notifications). Split back out of the single ROW_TYPE_ALL
++            // row from section 10 of aosp_rpi4_tv-launcher-ui-plan.md:
++            // that one-row layout left a large empty gap between the hero
++            // text and the row (matching the reference's hero position but
++            // not its content density, since the reference has a second
++            // "Top picks for you" content row this launcher has no real
++            // data source for -- see plan section 11). Two real rows of
++            // real data close most of that gap without fabricating
++            // content. Both still fit on one 1080p screen without
++            // scrolling at the smaller circular_tile_size from section 11.
++            // Back to a single merged row (ROW_TYPE_ALL): every reference
++            // screenshot shows ONE horizontal strip of circular app icons
++            // at the bottom, not two stacked rows -- user: "Nó phải thành
++            // 1 hàng ngang cơ mà" after the brief Apps+Settings split (see
++            // aosp_rpi4_tv-launcher-ui-plan.md section 11 for why that
++            // split happened and why it's reverted here).
+             getFragmentManager().beginTransaction()
+-                    // Search row
+-                    .add(R.id.launcher_container,
+-                            SearchFragment.newInstance())
+-                    // Apps row
+-                    .add(R.id.launcher_container,
+-                            AppFragment.newInstance(AppFragment.ROW_TYPE_APPS))
+-                    // Games row
+-                    .add(R.id.launcher_container,
+-                            AppFragment.newInstance(AppFragment.ROW_TYPE_GAMES))
+-                    // Settings row
+-                    .add(R.id.launcher_container,
+-                            AppFragment.newInstance(AppFragment.ROW_TYPE_SETTINGS))
++                    .add(R.id.launcher_container, AppFragment.newInstance(
++                            AppFragment.ROW_TYPE_ALL, /* circularStyle= */ true))
+                     .commit();
+         }
+ 
+         mSystemUpdateChecker = new SystemUpdateChecker(this);
+     }
+ 
++    /**
++     * Top bar (top_bar.xml): Home/Live/Apps tabs + icon-only Search/
++     * assistant/home/Settings + clock, fixed above everything. This
++     * launcher only has one screen and (since the ROW_TYPE_ALL
++     * consolidation, see onCreate()) everything fits without scrolling, so
++     * "Home"/"Apps" don't scroll to anything anymore -- they just move
++     * D-pad focus to the row, since it's already fully on-screen. The pill
++     * highlight on Home/Live/Apps is a pure focus indicator (see
++     * setUpTopBarTab()), not a fixed "current page" marker. The clock
++     * (TextClock) needs no wiring here; it updates itself.
++     *
++     * <p>The assistant (sparkle) and home-button icons don't have a
++     * distinct real destination of their own in this launcher, so they're
++     * wired to the same actions as Search and Home respectively, rather
++     * than being decorative dead buttons.
++     */
++    private void setUpTopBar() {
++        // Same intent SearchFragment's voice orb sends; see
++        // SearchFragment#onClick(). Duplicated here rather than shared
++        // since SearchFragment's constants are private to that class and
++        // this is a one-line intent.
++        final Intent assistIntent = new Intent(Intent.ACTION_ASSIST)
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
++                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
++        // Real account photo/name would need the GET_ACCOUNTS permission
++        // plus a network fetch, out of scope here -- opens account
++        // settings instead, a real destination rather than a decorative
++        // dead button, same pattern as the assistant/home-button below.
++        setUpTopBarIconButton(findViewById(R.id.top_bar_account),
++                R.drawable.top_bar_account_background);
++        findViewById(R.id.top_bar_account).setOnClickListener(v -> startActivitySafely(
++                new Intent(Settings.ACTION_SYNC_SETTINGS)));
++        setUpTopBarIconButton(findViewById(R.id.top_bar_search));
++        findViewById(R.id.top_bar_search).setOnClickListener(v -> startActivitySafely(assistIntent));
++        setUpTopBarIconButton(findViewById(R.id.top_bar_assistant));
++        findViewById(R.id.top_bar_assistant).setOnClickListener(
++                v -> startActivitySafely(assistIntent));
++
++        setUpTopBarTab(findViewById(R.id.top_bar_home));
++        findViewById(R.id.top_bar_home).setOnClickListener(v -> v.requestFocus());
++        setUpTopBarIconButton(findViewById(R.id.top_bar_home_button));
++        findViewById(R.id.top_bar_home_button).setOnClickListener(
++                v -> findViewById(R.id.top_bar_home).requestFocus());
++
++        // Confirmed via `adb shell cmd package query-activities` to be the
++        // real Live TV activity on this device (isDefault=true for
++        // CATEGORY_LEANBACK_LAUNCHER), not a guessed package/component.
++        setUpTopBarTab(findViewById(R.id.top_bar_live));
++        findViewById(R.id.top_bar_live).setOnClickListener(v -> startActivitySafely(
++                new Intent().setComponent(
++                        new ComponentName("com.android.tv", "com.android.tv.TvActivity"))));
++
++        setUpTopBarTab(findViewById(R.id.top_bar_apps));
++        findViewById(R.id.top_bar_apps).setOnClickListener(
++                v -> findViewById(R.id.launcher_container).requestFocus());
++
++        setUpTopBarIconButton(findViewById(R.id.top_bar_settings));
++        findViewById(R.id.top_bar_settings).setOnClickListener(
++                v -> startActivitySafely(new Intent(Settings.ACTION_SETTINGS)));
++    }
++
++    /**
++     * Applies the white-circle-on-focus look to an icon-only top bar button
++     * (Search/assistant/home/Settings). These only had
++     * {@code ?android:attr/selectableItemBackground} before, which is a
++     * faint ripple, not a proper focus indicator, and reported as invisible
++     * on D-pad focus -- unlike the Home/Live/Apps tabs (setUpTopBarTab()) or
++     * the row tiles (AppFragment.AppViewHolder#bind()), both of which
++     * already had a clear on-focus treatment. Reuses
++     * circular_tile_background_focused.xml (the same white circle the row
++     * tiles use) so the focus language is consistent across the screen, and
++     * darkens the icon itself on focus for contrast against that white
++     * circle, matching how the Home/Live/Apps pill also swaps its text to a
++     * dark color when focused.
++     */
++    private void setUpTopBarIconButton(ImageView icon) {
++        setUpTopBarIconButton(icon, /* unfocusedBackgroundResId= */ 0);
++    }
++
++    /**
++     * @param unfocusedBackgroundResId a drawable to show when NOT focused,
++     *     instead of no background at all -- used for top_bar_account,
++     *     which needs a permanent filled-circle "avatar chip" look (see
++     *     top_bar_account_background.xml) rather than reading as a bare
++     *     icon the rest of the time.
++     */
++    private void setUpTopBarIconButton(ImageView icon, int unfocusedBackgroundResId) {
++        icon.setOnFocusChangeListener((v, hasFocus) -> {
++            icon.setBackground(hasFocus
++                    ? getDrawable(R.drawable.circular_tile_background_focused)
++                    : (unfocusedBackgroundResId != 0
++                            ? getDrawable(unfocusedBackgroundResId) : null));
++            icon.setColorFilter(hasFocus
++                    ? getColor(R.color.top_bar_active_pill_text_color)
++                    : getColor(R.color.top_bar_text_color));
++        });
++    }
++
++    private void startActivitySafely(Intent intent) {
++        try {
++            startActivity(intent);
++        } catch (ActivityNotFoundException e) {
++            Log.e(TAG, "Exception launching intent " + intent, e);
++            Toast.makeText(this, getString(R.string.app_unavailable), Toast.LENGTH_SHORT).show();
++        }
++    }
++
++    /**
++     * Applies the pill-on-focus look to a Home/Live/Apps tab. Was
++     * originally hardcoded onto "Home" as a permanently-active tab, but
++     * that meant the pill never moved to the focused tab, which reads as a
++     * broken tab bar -- fixed to be purely focus-driven, matching how the
++     * row tiles below already react to focus (see
++     * AppFragment.AppViewHolder#bind()).
++     */
++    private void setUpTopBarTab(TextView tab) {
++        tab.setOnFocusChangeListener((v, hasFocus) -> {
++            tab.setBackground(hasFocus
++                    ? getDrawable(R.drawable.top_bar_active_tab_background) : null);
++            tab.setTextColor(hasFocus
++                    ? getColor(R.color.top_bar_active_pill_text_color)
++                    : getColor(R.color.top_bar_text_color_inactive));
++            tab.setTypeface(tab.getTypeface(), hasFocus ? Typeface.BOLD : Typeface.NORMAL);
++        });
++    }
++
++    /**
++     * Hero text (hero_banner.xml) and the full-screen backdrop
++     * (hero_backdrop_* in launcher.xml) both follow whichever LaunchItem
++     * currently has focus, in any row -- see
++     * AppFragment.AppViewHolder#bind() for where this fires from.
++     *
++     * <p>There is deliberately only ONE image view for the banner now
++     * (hero_backdrop_image, full-screen). It used to be two: a sharp one
++     * confined to the hero's top region plus a separately-blurred
++     * full-screen one behind it, which produced a hard visible seam where
++     * the sharp box ended and the blurred area began -- looked like two
++     * stacked images instead of one continuous photo. Confirmed on-device.
++     */
++    @Override
++    public void onItemFocused(LaunchItem item, CharSequence rowTitle) {
++        mHeroTitle.setText(item.getLabel());
++        mHeroSubtitle.setText(rowTitle);
++
++        // hero_backdrop_fallback's solid color (launcher.xml) is the base
++        // in both states; only the banner image/scrim and the fallback
++        // icon toggle.
++        final Drawable banner = item.getBanner();
++        if (banner != null) {
++            mHeroBackdropImage.setImageDrawable(banner);
++            mHeroBackdropImage.setVisibility(View.VISIBLE);
++            mHeroBackdropScrim.setVisibility(View.VISIBLE);
++            mHeroBackdropScrimHorizontal.setVisibility(View.VISIBLE);
++            mHeroFallbackIcon.setVisibility(View.GONE);
++        } else {
++            mHeroBackdropImage.setVisibility(View.GONE);
++            mHeroBackdropScrim.setVisibility(View.GONE);
++            mHeroBackdropScrimHorizontal.setVisibility(View.GONE);
++            mHeroFallbackIcon.setImageDrawable(item.getIcon());
++            mHeroFallbackIcon.setVisibility(View.VISIBLE);
++        }
++    }
++
+     @Override
+     protected void onResume() {
+         super.onResume();
+diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
+index 59897d2..c3636f8 100644
+--- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
++++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
+@@ -29,7 +29,9 @@ import android.content.Loader;
+ import android.content.ServiceConnection;
+ import android.database.Cursor;
+ import android.database.DatabaseUtils;
++import android.content.res.Resources;
+ import android.os.Bundle;
++import android.util.ArraySet;
+ import android.os.IBinder;
+ import androidx.annotation.IdRes;
+ import androidx.annotation.MainThread;
+@@ -54,6 +56,7 @@ import com.example.sampleleanbacklauncher.util.LauncherAsyncTaskLoader;
+ 
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
++import java.util.LinkedHashMap;
+ import java.util.Map;
+ import java.util.Objects;
+ import java.util.Set;
+@@ -61,16 +64,31 @@ import java.util.Set;
+ 
+ public class AppFragment extends Fragment {
+     @Retention(RetentionPolicy.SOURCE)
+-    @StringDef({ROW_TYPE_APPS, ROW_TYPE_GAMES, ROW_TYPE_SETTINGS})
++    @StringDef({ROW_TYPE_APPS, ROW_TYPE_GAMES, ROW_TYPE_SETTINGS, ROW_TYPE_ALL})
+     public @interface RowType {}
+     public static final String ROW_TYPE_APPS = "apps";
+     public static final String ROW_TYPE_GAMES = "games";
+     public static final String ROW_TYPE_SETTINGS = "settings";
++    // Apps + Games + Settings items merged into one row ("Your Apps" in
++    // LauncherActivity). Added so everything fits on one screen without
++    // scrolling, matching a reference Google TV Home screenshot that has a
++    // single app-icon row, not three separate square-tile rows stacked
++    // below a full-size search row. See LauncherActivity#onCreate().
++    public static final String ROW_TYPE_ALL = "all";
++
++    /**
++     * Implemented by the hosting Activity so the hero region (hero_banner.xml)
++     * can update to whichever LaunchItem currently has focus, in any row.
++     */
++    public interface OnItemFocusedListener {
++        void onItemFocused(LaunchItem item, CharSequence rowTitle);
++    }
+ 
+     private static final String TAG = "AppFragment";
+     private static final boolean DEBUG = false;
+ 
+     private static final String ARG_ROW_TYPE = "AppFragment.ROW_TYPE";
++    private static final String ARG_CIRCULAR_STYLE = "AppFragment.CIRCULAR_STYLE";
+ 
+     private static final int ITEM_LOADER_ID = 1;
+     private static final int NOTIFS_COUNT_LOADER_ID = 2;
+@@ -78,8 +96,16 @@ public class AppFragment extends Fragment {
+     @RowType
+     private String mRowType;
+ 
++    // "Your Apps" row: circular, label-less items (launch_item_circular.xml)
++    // instead of the square "Favorite Apps" tile (launch_item.xml), same
++    // underlying data as ROW_TYPE_APPS. See newInstance(rowType, circular).
++    private boolean mCircularStyle;
++
+     private AppAdapter mAdapter;
+ 
++    @Nullable
++    private OnItemFocusedListener mItemFocusedListener;
++
+     private LaunchItemsManager mLaunchItemsManager;
+     private final ServiceConnection mLaunchItemsServiceConnection = new ServiceConnection() {
+         @Override
+@@ -95,19 +121,50 @@ public class AppFragment extends Fragment {
+     };
+ 
+     public static AppFragment newInstance(@RowType String rowType) {
+-        Bundle args = new Bundle(1);
++        return newInstance(rowType, /* circularStyle= */ false);
++    }
++
++    /**
++     * @param circularStyle true for the "Your Apps" row: same data as
++     *     rowType, styled as circular label-less icons instead of the
++     *     square "Favorite Apps"/"Games"/"Settings" tile style.
++     */
++    public static AppFragment newInstance(@RowType String rowType, boolean circularStyle) {
++        Bundle args = new Bundle(2);
+         args.putString(ARG_ROW_TYPE, rowType);
++        args.putBoolean(ARG_CIRCULAR_STYLE, circularStyle);
+ 
+         AppFragment fragment = new AppFragment();
+         fragment.setArguments(args);
+         return fragment;
+     }
+ 
++    @Override
++    public void onAttach(Context context) {
++        super.onAttach(context);
++        if (context instanceof OnItemFocusedListener) {
++            mItemFocusedListener = (OnItemFocusedListener) context;
++        }
++    }
++
++    @Override
++    public void onDetach() {
++        super.onDetach();
++        mItemFocusedListener = null;
++    }
++
++    void notifyItemFocused(LaunchItem item) {
++        if (mItemFocusedListener != null) {
++            mItemFocusedListener.onItemFocused(item, getRowTitle());
++        }
++    }
++
+     @Override
+     public void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         //noinspection WrongConstant
+         mRowType = getArguments().getString(ARG_ROW_TYPE, ROW_TYPE_APPS);
++        mCircularStyle = getArguments().getBoolean(ARG_CIRCULAR_STYLE, false);
+         final Context context = getContext();
+         context.bindService(new Intent(context, LaunchItemsManager.class),
+                 mLaunchItemsServiceConnection, Context.BIND_AUTO_CREATE);
+@@ -124,11 +181,21 @@ public class AppFragment extends Fragment {
+         final TextView rowTitle = (TextView) root.findViewById(R.id.row_title);
+         rowTitle.setText(getRowTitle());
+         final RecyclerView list = (RecyclerView) root.findViewById(android.R.id.list);
++        if (mCircularStyle) {
++            // See circular_row_item_height's comment in dimens.xml: the
++            // layout's default height (app_item_height) is sized for the
++            // taller square tile, not this row's smaller circular one.
++            final ViewGroup.LayoutParams params = list.getLayoutParams();
++            params.height = getResources().getDimensionPixelSize(R.dimen.circular_row_item_height);
++            list.setLayoutParams(params);
++        }
+         mAdapter = new AppAdapter();
+         getLoaderManager().initLoader(ITEM_LOADER_ID, null, new ItemLoaderCallbacks());
+         list.setAdapter(mAdapter);
+ 
+-        if (mRowType == ROW_TYPE_SETTINGS) {
++        // ROW_TYPE_ALL includes the settings items too, so it needs the
++        // same notification-count loader ROW_TYPE_SETTINGS does.
++        if (mRowType == ROW_TYPE_SETTINGS || mRowType == ROW_TYPE_ALL) {
+             getLoaderManager().initLoader(NOTIFS_COUNT_LOADER_ID, null,
+                     new NotifsCountLoaderCallbacks());
+         }
+@@ -144,6 +211,19 @@ public class AppFragment extends Fragment {
+     }
+ 
+     private @IdRes int getRootViewId() {
++        // The circular style is used for more than one row now (see
++        // LauncherActivity#onCreate(): "Your Apps" + "Settings", split back
++        // out of the single ROW_TYPE_ALL row to match a reference
++        // screenshot's 2-row layout), so it can't just hardcode one id
++        // regardless of mRowType anymore -- each inflated root still needs
++        // its own unique id, see the class javadoc on onCreateView() about
++        // why root views need unique ids at all. settings_row was declared
++        // but unused since the square Settings row was retired in the
++        // ROW_TYPE_ALL consolidation, so it's reused here rather than
++        // adding a new id.
++        if (mCircularStyle) {
++            return mRowType == ROW_TYPE_SETTINGS ? R.id.settings_row : R.id.your_apps_row;
++        }
+         switch (mRowType) {
+             case ROW_TYPE_APPS:
+                 return R.id.apps_row;
+@@ -156,6 +236,9 @@ public class AppFragment extends Fragment {
+     }
+ 
+     public CharSequence getRowTitle() {
++        if (mCircularStyle && mRowType != ROW_TYPE_SETTINGS) {
++            return getText(R.string.your_apps_row_title);
++        }
+         switch (mRowType) {
+             case ROW_TYPE_APPS:
+                 return getText(R.string.apps_row_title);
+@@ -225,17 +308,49 @@ public class AppFragment extends Fragment {
+         }
+ 
+         public void bind(LaunchItem launchItem) {
+-            mView.findViewById(R.id.frame).setContentDescription(launchItem.getLabel());
+-            mView.findViewById(R.id.frame).setOnClickListener(this);
+-
+-            mView.findViewById(R.id.banner).setVisibility(View.VISIBLE);
+-
+-            mView.findViewById(R.id.ll).setVisibility(View.VISIBLE);
++            final int focusedBg = mCircularStyle
++                    ? R.drawable.circular_tile_background_focused
++                    : R.drawable.app_tile_background_focused;
++            final int unfocusedBg = mCircularStyle
++                    ? R.drawable.circular_tile_background
++                    : R.drawable.app_tile_background;
++
++            final View frame = mView.findViewById(R.id.frame);
++            // Defensive reset: whatever animation last touched this View
++            // (recycled or not) might have been cut off mid-flight rather
++            // than reaching its end state -- e.g. a RecyclerView change
++            // animation interrupted by the Activity pausing when the item
++            // that got clicked launches (see LaunchItem#areContentsTheSame()
++            // for the root cause this was actually chasing). bind() is the
++            // one place guaranteed to run before this tile is shown again,
++            // so it's the right place to force a known-good visual state
++            // regardless of what an in-flight animator left behind.
++            frame.animate().cancel();
++            frame.setAlpha(1f);
++            frame.setScaleX(1f);
++            frame.setScaleY(1f);
++            frame.setContentDescription(launchItem.getLabel());
++            frame.setOnClickListener(this);
++            frame.setOnFocusChangeListener((v, hasFocus) -> {
++                final Resources resources = getResources();
++                final float scale = hasFocus
++                        ? resources.getFraction(R.fraction.app_tile_focused_zoom, 1, 1) : 1.0f;
++                final int duration = resources.getInteger(R.integer.app_tile_scale_duration_ms);
++                v.animate().scaleX(scale).scaleY(scale).setDuration(duration).start();
++                v.setBackgroundResource(hasFocus ? focusedBg : unfocusedBg);
++                if (hasFocus) {
++                    notifyItemFocused(launchItem);
++                }
++            });
+ 
+-            TextView launchItemLabel = mView.findViewById(R.id.label);
+-            launchItemLabel.setText(launchItem.getLabel());
++            // launch_item_circular.xml (the "Your Apps" row) has no
++            // R.id.label by design -- see that layout's comment.
++            final TextView launchItemLabel = mView.findViewById(R.id.label);
++            if (launchItemLabel != null) {
++                launchItemLabel.setText(launchItem.getLabel());
++            }
+ 
+-            ImageView launchItemIcon = mView.findViewById(R.id.icon);
++            final ImageView launchItemIcon = mView.findViewById(R.id.icon);
+             launchItemIcon.setImageDrawable(launchItem.getIcon());
+         }
+ 
+@@ -277,7 +392,9 @@ public class AppFragment extends Fragment {
+         @Override
+         public AppViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
+             final LayoutInflater inflater = LayoutInflater.from(parent.getContext());
+-            return new AppViewHolder(inflater.inflate(R.layout.launch_item, parent, false));
++            final int itemLayout =
++                    mCircularStyle ? R.layout.launch_item_circular : R.layout.launch_item;
++            return new AppViewHolder(inflater.inflate(itemLayout, parent, false));
+         }
+ 
+         @Override
+@@ -379,6 +496,17 @@ public class AppFragment extends Fragment {
+                     LocalBroadcastManager.getInstance(getContext()).registerReceiver(mReceiver,
+                             new IntentFilter(LaunchItemsManager.ACTION_SETTINGS_LIST_INVALIDATED));
+                     break;
++                case ROW_TYPE_ALL: {
++                    // Merged row: refresh on a change to any of the three
++                    // underlying lists, not just one.
++                    final IntentFilter filter = new IntentFilter();
++                    filter.addAction(LaunchItemsManager.ACTION_APP_LIST_INVALIDATED);
++                    filter.addAction(LaunchItemsManager.ACTION_GAME_LIST_INVALIDATED);
++                    filter.addAction(LaunchItemsManager.ACTION_SETTINGS_LIST_INVALIDATED);
++                    LocalBroadcastManager.getInstance(getContext())
++                            .registerReceiver(mReceiver, filter);
++                    break;
++                }
+             }
+             // Force a load to pick up any changes since we stopped listening
+             onContentChanged();
+@@ -408,6 +536,10 @@ public class AppFragment extends Fragment {
+                         return mLaunchItemsManager.getGameItems();
+                     case ROW_TYPE_SETTINGS:
+                         return mLaunchItemsManager.getSettingsItems();
++                    case ROW_TYPE_ALL:
++                        return mergeDedupingByComponent(mLaunchItemsManager.getAppItems(),
++                                mLaunchItemsManager.getGameItems(),
++                                mLaunchItemsManager.getSettingsItems());
+                     default:
+                         throw new IllegalStateException("Unknown row type");
+                 }
+@@ -415,6 +547,38 @@ public class AppFragment extends Fragment {
+                 return null;
+             }
+         }
++
++        /**
++         * The Android TV Settings app declares both
++         * CATEGORY_LEANBACK_LAUNCHER (so it's a normal app tile) and
++         * CATEGORY_LEANBACK_SETTINGS (so it's also a settings-row item), by
++         * original AOSP design meant to be seen once in each of two
++         * separate rows. Confirmed on-device: merging those rows into
++         * ROW_TYPE_ALL without this surfaced as the same gear icon shown
++         * twice in the same row with nothing to explain why. De-dupes by
++         * target component, first-seen wins (apps before games before
++         * settings, matching the argument order everywhere this is called).
++         */
++        @SafeVarargs
++        private static Set<LaunchItem> mergeDedupingByComponent(Set<LaunchItem>... sources) {
++            final Map<ComponentName, LaunchItem> byComponent = new LinkedHashMap<>();
++            // Items without a resolvable component (none observed in
++            // practice) go here instead of being silently dropped.
++            final Set<LaunchItem> noComponent = new ArraySet<>();
++            for (Set<LaunchItem> source : sources) {
++                for (LaunchItem item : source) {
++                    final ComponentName component = item.getIntent().getComponent();
++                    if (component == null) {
++                        noComponent.add(item);
++                    } else {
++                        byComponent.putIfAbsent(component, item);
++                    }
++                }
++            }
++            final Set<LaunchItem> merged = new ArraySet<>(byComponent.values());
++            merged.addAll(noComponent);
++            return merged;
++        }
+     }
+ 
+     private class NotifsCountLoaderCallbacks implements LoaderManager.LoaderCallbacks<Cursor> {
+diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/LaunchItem.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/LaunchItem.java
+index 4f59bde..eeb2c0f 100644
+--- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/LaunchItem.java
++++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/LaunchItem.java
+@@ -72,13 +72,29 @@ public class LaunchItem implements Comparable<LaunchItem> {
+ 
+     /**
+      * Returns whether this item should appear identical to the given item.
++     *
++     * <p>Deliberately does NOT compare {@link #getBanner()}/{@link #getIcon()}
++     * Drawables: {@code Drawable} doesn't override {@code equals()}, so two
++     * separately-loaded Drawables for the exact same app icon are never
++     * "equal" by reference, even though they render identically. Comparing
++     * them made this return false on every single list rescan (e.g. the one
++     * {@code LaunchItemsManager#notifyItemLaunched()} triggers on every app
++     * launch), which made {@code SortedList} treat every row item as
++     * "changed" constantly and made {@code RecyclerView}'s default change
++     * animation (a cross-fade) run on tiles that hadn't actually changed.
++     * Root-caused on-device to a "Favorite Apps" icon going invisible: launch
++     * an app -> the resulting list rescan starts that fade on the just-left
++     * row right as this Activity is paused -> the animation gets cut off
++     * mid-fade -> the tile comes back from onResume() with its icon's alpha
++     * stuck near 0. See also AppFragment.AppViewHolder#bind()'s alpha reset,
++     * which is a second line of defense against the same symptom regardless
++     * of cause.
++     *
+      * @param another Item to compare to
+      * @return True if items should appear identical
+      */
+     public boolean areContentsTheSame(LaunchItem another) {
+-        return Objects.equals(another.getBanner(), getBanner())
+-                && Objects.equals(another.getIcon(), getIcon())
+-                && Objects.equals(another.getLabel(), getLabel());
++        return Objects.equals(another.getLabel(), getLabel());
+     }
+ 
+     @Override
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background.xml
+new file mode 100644
+index 0000000..7e9fae5
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Rounded square tile behind a launch item's icon, "Favorite Apps"-style.
++     Plain shape, not CardView: androidx.cardview is not a build
++     dependency of this module and we don't want to add one for this. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/app_tile_background" />
++    <corners android:radius="@dimen/app_tile_corner_radius" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background_focused.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background_focused.xml
+new file mode 100644
+index 0000000..cf29aa2
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/app_tile_background_focused.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Swapped in by AppFragment.AppViewHolder on focus, alongside a small
++     scale-up, as the tile's focus feedback (this launcher had none before). -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/app_tile_background_focused" />
++    <corners android:radius="@dimen/app_tile_corner_radius" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background.xml
+new file mode 100644
+index 0000000..966acd0
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background.xml
+@@ -0,0 +1,28 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Circular backdrop for launch_item_circular.xml's "Your Apps"/
++     "Settings" rows, matching the reference screenshot's circular app
++     icons. Was briefly changed to a rounded square per an earlier request
++     ("co các icon lại cho vuông đi"), then reverted back to circular the
++     same day once the user pointed at the reference image again ("Nó
++     phải là hình tròn"). See app_item_padding's comment in dimens.xml,
++     which still applies regardless of shape. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="oval">
++    <solid android:color="@color/app_tile_background" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background_focused.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background_focused.xml
+new file mode 100644
+index 0000000..46f6acd
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/circular_tile_background_focused.xml
+@@ -0,0 +1,21 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="oval">
++    <solid android:color="@color/app_tile_background_focused" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml
+new file mode 100644
+index 0000000..09530ed
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Darkens the full-screen ambient backdrop (hero_backdrop_image in
++     launcher.xml) toward the bottom, where the app row sits, same gradient
++     shape as hero_scrim.xml but with a darker end color since this covers
++     much more of the image than the hero region's own scrim does. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <!-- angle=270 => gradient points top-to-bottom (start=top, end=bottom) -->
++    <gradient
++        android:angle="270"
++        android:startColor="#00000000"
++        android:centerColor="#59000000"
++        android:endColor="#E6000000"
++        android:type="linear" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim.xml
+new file mode 100644
+index 0000000..b4c9998
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim.xml
+@@ -0,0 +1,28 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Bottom-heavy gradient over the hero banner image so the title/subtitle
++     stay legible regardless of what the banner image looks like. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <!-- angle=270 => gradient points top-to-bottom (start=top, end=bottom) -->
++    <gradient
++        android:angle="270"
++        android:startColor="@color/hero_scrim_top"
++        android:endColor="@color/hero_scrim_bottom"
++        android:type="linear" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim_horizontal.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim_horizontal.xml
+new file mode 100644
+index 0000000..628dcd2
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_scrim_horizontal.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Left-heavy gradient over the hero banner image, layered with
++     hero_scrim.xml's bottom-heavy one (see hero_banner.xml) to match a
++     reference Google TV Home screenshot: the image stays clear on the
++     right, fading to solid dark on the left where the title/subtitle sit,
++     and dark at the bottom for the same reason. Reuses hero_scrim_top/
++     hero_scrim_bottom rather than adding new colors: same darkness, just a
++     different direction. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <!-- angle=0 => gradient points left-to-right (start=left, end=right) -->
++    <gradient
++        android:angle="0"
++        android:startColor="@color/hero_scrim_bottom"
++        android:endColor="@color/hero_scrim_top"
++        android:type="linear" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/ic_account.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_account.xml
+new file mode 100644
+index 0000000..98629ef
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_account.xml
+@@ -0,0 +1,35 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Standard Material "account_circle" glyph, standing in for the current
++     Google account's profile photo in a reference Google TV Home
++     screenshot (see top_bar_account in top_bar.xml). Fetching the real
++     account avatar would need the GET_ACCOUNTS permission plus a network
++     fetch of the profile photo, which is out of scope for this re-skin;
++     top_bar_account instead opens account settings so it is a real,
++     working entry point rather than a decorative dead button, consistent
++     with top_bar_assistant/top_bar_home_button elsewhere in this file.
++     Tinted white by the ImageView that uses it. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM12,5c1.66,0 3,1.34 3,3s-1.34,3 -3,3 -3,-1.34 -3,-3 1.34,-3 3,-3zM12,19.2c-2.5,0 -4.71,-1.28 -6,-3.22 0.03,-1.99 4,-3.08 6,-3.08 1.99,0 5.97,1.09 6,3.08 -1.29,1.94 -3.5,3.22 -6,3.22z" />
++</vector>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/ic_gear.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_gear.xml
+new file mode 100644
+index 0000000..9f34fb9
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_gear.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Standard Material "settings" gear/cog glyph, replacing
++     @android:drawable/ic_menu_preferences (which renders as a wrench, not a
++     gear, on this framework revision) for top_bar_settings in top_bar.xml.
++     Tinted white by the ImageView that uses it, so fillColor here is a
++     placeholder. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z" />
++</vector>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/ic_home.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_home.xml
+new file mode 100644
+index 0000000..896dcd6
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_home.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Standard Material "home" glyph, for the icon-only home button in the
++     right-hand cluster (see top_bar.xml), matching a reference Google TV
++     Home screenshot. Tinted white by the ImageView that uses it. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M10,20v-6h4v6h5v-8h3L12,3L2,12h3v8z" />
++</vector>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/ic_search.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_search.xml
+new file mode 100644
+index 0000000..8afc465
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_search.xml
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Clean Material magnifying-glass glyph for top_bar_search in
++     top_bar.xml, replacing @android:drawable/ic_menu_search (a dated,
++     heavy-stroke framework icon). Tinted white by the ImageView that uses
++     it, so fillColor here is a placeholder. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M15.5,14h-0.79l-0.28,-0.27C15.41,12.59 16,11.11 16,9.5 16,5.91 13.09,3 9.5,3S3,5.91 3,9.5 5.91,16 9.5,16c1.61,0 3.09,-0.59 4.23,-1.57l0.27,0.28v0.79l5,4.99L20.49,19l-4.99,-5zM9.5,14C7.01,14 5,11.99 5,9.5S7.01,5 9.5,5 14,7.01 14,9.5 11.99,14 9.5,14z" />
++</vector>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/ic_sparkle.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_sparkle.xml
+new file mode 100644
+index 0000000..e50b778
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/ic_sparkle.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Single 4-point sparkle/twinkle glyph for the assistant/"Gemini" icon,
++     replacing the earlier multi-burst "auto_awesome" glyph per an updated
++     reference Google TV Home screenshot, which shows one clean star shape
++     here rather than a cluster of three. Tinted white by the ImageView
++     that uses it. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FF000000"
++        android:pathData="M12,2L14,10 22,12 14,14 12,22 10,14 2,12 10,10Z" />
++</vector>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_account_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_account_background.xml
+new file mode 100644
+index 0000000..0f023b8
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_account_background.xml
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Permanent (not focus-only) muted circle behind top_bar_account, so it
++     reads as a filled avatar chip like the reference's account photo
++     rather than a bare outline icon floating loose in the pill; user
++     flagged the bare-icon version as looking "tách hẳn ra" (detached) from
++     the button group even though it was already inside the same
++     top_bar_group_background pill. This sits underneath the focus-state
++     circular_tile_background_focused (opaque white), which still swaps in
++     on top of this on focus via setUpTopBarIconButton()'s
++     unfocusedBackgroundResId overload. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="oval">
++    <solid android:color="@color/top_bar_account_background" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_active_tab_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_active_tab_background.xml
+new file mode 100644
+index 0000000..dd295eb
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_active_tab_background.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Solid rounded pill behind the always-active "Home" tab in top_bar.xml,
++     radius >= half the tab's own height so it renders as a full capsule
++     rather than a rounded rectangle. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/top_bar_active_pill_background" />
++    <corners android:radius="@dimen/top_bar_pill_radius" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_group_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_group_background.xml
+new file mode 100644
+index 0000000..e50330b
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/top_bar_group_background.xml
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Soft rounded capsule behind a whole top_bar button group (the
++     Search/Home/Live/Apps cluster, and separately the assistant/home/
++     settings cluster) in top_bar.xml, matching a reference Google TV Home
++     screenshot: the group itself sits on a translucent pill, and the
++     active tab's own solid pill (top_bar_active_tab_background) then sits
++     on top of that. This is a distinct layer from that one; adding it
++     was the missing piece before this looked like plain icons floating on
++     the backdrop instead of a grouped control. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/top_bar_group_background" />
++    <corners android:radius="@dimen/top_bar_group_radius" />
++</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/hero_banner.xml b/TvSampleLeanbackLauncher/src/main/res/layout/hero_banner.xml
+new file mode 100644
+index 0000000..4091ce2
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/hero_banner.xml
+@@ -0,0 +1,84 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Just a positioning container for the title/subtitle text (and the
++     no-banner fallback icon) over the upper part of the screen. Does NOT
++     have its own image/background anymore: it used to (a sharp banner
++     image + its own scrim, separate from launcher.xml's full-screen
++     backdrop), but that made a hard visible seam where the sharp hero box
++     ended and the blurred backdrop began, which looked like two stacked
++     images instead of one continuous photo. Confirmed on-device it looked
++     wrong. Now there is exactly one image (hero_backdrop_image in
++     launcher.xml, full-screen, behind this) and this just positions text
++     over it, matching a reference Google TV Home screenshot where the
++     photo is genuinely one continuous background.
++
++     Not focusable itself, so DPAD_UP from the first row doesn't dead-end
++     here instead of moving to the row above. -->
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/hero_root"
++    android:layout_width="match_parent"
++    android:layout_height="@dimen/hero_height"
++    android:focusable="false"
++    android:focusableInTouchMode="false"
++    android:descendantFocusability="blocksDescendants"
++    android:clipChildren="false"
++    android:clipToPadding="false">
++
++    <!-- Shown only when the focused item has no banner (see
++         LauncherActivity#onItemFocused()); the full-screen solid-color
++         fallback behind this (hero_backdrop_fallback in launcher.xml)
++         handles the background in that case, this is just the icon. -->
++    <ImageView
++        android:id="@+id/hero_fallback_icon"
++        android:layout_width="@dimen/hero_fallback_icon_size"
++        android:layout_height="@dimen/hero_fallback_icon_size"
++        android:layout_gravity="center" />
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_gravity="bottom|start"
++        android:layout_marginStart="@dimen/overscan_horizontal"
++        android:layout_marginBottom="@dimen/hero_text_margin_bottom"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@+id/hero_title"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:textSize="@dimen/hero_title_text_size"
++            android:textColor="@color/hero_title_text_color"
++            android:textStyle="bold"
++            android:shadowColor="#80000000"
++            android:shadowDx="0"
++            android:shadowDy="1"
++            android:shadowRadius="4" />
++
++        <TextView
++            android:id="@+id/hero_subtitle"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="4dp"
++            android:textSize="@dimen/hero_subtitle_text_size"
++            android:textColor="@color/hero_subtitle_text_color"
++            android:shadowColor="#80000000"
++            android:shadowDx="0"
++            android:shadowDy="1"
++            android:shadowRadius="4" />
++    </LinearLayout>
++</FrameLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/launch_item.xml b/TvSampleLeanbackLauncher/src/main/res/layout/launch_item.xml
+index 4f52c7e..4f721ae 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/layout/launch_item.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/launch_item.xml
+@@ -15,38 +15,41 @@
+   ~ limitations under the License
+   -->
+ 
+-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:id="@+id/frame"
++<!-- "Favorite Apps"-style rounded square tile with the label below it,
++     instead of the old full-bleed banner-background item. Focus feedback
++     (scale + background swap) is applied in code, in
++     AppFragment.AppViewHolder#bind(), since there was none before and a
++     plain <shape> selector on a RecyclerView item doesn't reliably react to
++     the child's own focus state. -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+     android:layout_width="@dimen/app_item_width"
+-    android:layout_height="@dimen/app_item_height"
+-    android:background="?android:attr/selectableItemBackground"
+-    android:clickable="true"
+-    android:focusable="true"
+-    android:padding="@dimen/app_item_padding"
+-    >
+-    <ImageView
+-        android:id="@+id/banner"
+-        android:layout_width="match_parent"
+-        android:layout_height="match_parent"/>
+-    <LinearLayout
+-        android:id="@+id/ll"
+-        android:layout_width="wrap_content"
+-        android:layout_height="wrap_content"
+-        android:layout_gravity="center"
+-        android:orientation="vertical"
+-        >
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:padding="@dimen/app_item_padding">
++
++    <FrameLayout
++        android:id="@+id/frame"
++        android:layout_width="@dimen/app_tile_size"
++        android:layout_height="@dimen/app_tile_size"
++        android:layout_gravity="center_horizontal"
++        android:background="@drawable/app_tile_background"
++        android:clickable="true"
++        android:focusable="true">
++
+         <ImageView
+             android:id="@+id/icon"
+             android:layout_width="@dimen/app_icon_size"
+             android:layout_height="@dimen/app_icon_size"
+-            android:layout_gravity="center_horizontal"
+-            android:layout_marginBottom="@dimen/app_icon_margin"
+-        />
+-        <TextView
+-            android:id="@+id/label"
+-            android:layout_width="wrap_content"
+-            android:layout_height="wrap_content"
+-            android:layout_gravity="center_horizontal"
+-        />
+-    </LinearLayout>
+-</FrameLayout>
++            android:layout_gravity="center" />
++    </FrameLayout>
++
++    <TextView
++        android:id="@+id/label"
++        android:layout_width="@dimen/app_item_width"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="@dimen/app_label_margin_top"
++        android:gravity="center_horizontal"
++        android:singleLine="true"
++        android:ellipsize="end"
++        android:textColor="@color/primary_text_color" />
++</LinearLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/launch_item_circular.xml b/TvSampleLeanbackLauncher/src/main/res/layout/launch_item_circular.xml
+new file mode 100644
+index 0000000..10f9254
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/launch_item_circular.xml
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Circular, label-less item for the "Your Apps" row (see
++     AppFragment#newInstance(rowType, circularStyle=true) and
++     LauncherActivity). Deliberately has no R.id.label: AppViewHolder#bind()
++     in AppFragment.java null-checks for it and skips the label step when
++     absent, so this layout intentionally doesn't declare one rather than
++     declaring an unused hidden view. -->
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/frame"
++    android:layout_width="@dimen/circular_tile_size"
++    android:layout_height="@dimen/circular_tile_size"
++    android:layout_margin="@dimen/app_item_padding"
++    android:background="@drawable/circular_tile_background"
++    android:clickable="true"
++    android:focusable="true">
++
++    <ImageView
++        android:id="@+id/icon"
++        android:layout_width="@dimen/circular_icon_size"
++        android:layout_height="@dimen/circular_icon_size"
++        android:layout_gravity="center" />
++</FrameLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
+index 1b05005..bf843ba 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
+@@ -14,6 +14,22 @@
+   ~ See the License for the specific language governing permissions and
+   ~ limitations under the License
+   -->
++<!-- Layer order (each item below paints over the previous ones):
++       1. hero_backdrop_* : the ONE full-screen ambient background image
++          (blurred/darkened), plus its two scrims (vertical: dark at the
++          bottom where the app row sits; horizontal: dark at the left
++          where the title sits). A single continuous image, not a sharp
++          hero-only image layered separately from a blurred full-screen
++          one, that produced a hard visible seam between the two,
++          confirmed wrong on-device. See hero_banner.xml, which now only
++          positions text over this, no image of its own.
++       2. hero_banner.xml : title/subtitle text positioning.
++       3. launcher_container : the app row, pinned to the BOTTOM of the
++          screen via layout_gravity, not flowing immediately after the
++          hero. With only one row (see LauncherActivity, ROW_TYPE_ALL)
++          this fits with room to spare, so there's no ScrollView here
++          anymore; the empty middle is exactly where hero_backdrop shows.
++       4. top_bar.xml : fixed nav bar, always on top. -->
+ <FrameLayout
+     xmlns:android="http://schemas.android.com/apk/res/android"
+     android:id="@+id/mostly_transparent_wrapper"
+@@ -21,21 +37,56 @@
+     android:layout_height="match_parent"
+     android:clipToPadding="false"
+     android:clipChildren="false">
+-    <ScrollView
+-        android:id="@+id/scroll_view"
++
++    <!-- Always-visible solid-color base, for when the focused item has no
++         banner. Declared FIRST (paints on the bottom): hero_backdrop_image
++         and the scrims need to layer on TOP of this, not the other way
++         around, or the blurred image never shows (confirmed on-device: had
++         this ordered backwards initially and the backdrop was just a flat
++         color, the image+scrims were there but fully hidden underneath). -->
++    <View
++        android:id="@+id/hero_backdrop_fallback"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
+-        android:layout_marginTop="@dimen/overscan_vertical"
++        android:background="@color/hero_fallback_background" />
++
++    <ImageView
++        android:id="@+id/hero_backdrop_image"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:scaleType="centerCrop"
++        android:visibility="gone" />
++
++    <View
++        android:id="@+id/hero_backdrop_scrim"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:background="@drawable/hero_backdrop_scrim"
++        android:visibility="gone" />
++
++    <!-- Reuses hero_scrim_horizontal.xml (originally sized to the hero-only
++         box, works the same stretched full-screen): darkens the left side,
++         full height, so the title text keeps contrast now that it sits
++         directly over the ambient image instead of its own dedicated
++         scrim. -->
++    <View
++        android:id="@+id/hero_backdrop_scrim_horizontal"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:background="@drawable/hero_scrim_horizontal"
++        android:visibility="gone" />
++
++    <include layout="@layout/hero_banner" />
++
++    <LinearLayout
++        android:id="@+id/launcher_container"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_gravity="bottom"
+         android:layout_marginBottom="@dimen/overscan_vertical"
+-        android:clipToPadding="false"
++        android:orientation="vertical"
+         android:clipChildren="false"
+-        android:scrollbars="none">
+-        <LinearLayout
+-            android:id="@+id/launcher_container"
+-            android:layout_width="match_parent"
+-            android:layout_height="wrap_content"
+-            android:orientation="vertical"
+-            android:clipChildren="false"
+-            android:clipToPadding="false"/>
+-    </ScrollView>
++        android:clipToPadding="false" />
++
++    <include layout="@layout/top_bar" />
+ </FrameLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/top_bar.xml b/TvSampleLeanbackLauncher/src/main/res/layout/top_bar.xml
+new file mode 100644
+index 0000000..9d085eb
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/top_bar.xml
+@@ -0,0 +1,229 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Fixed top bar, laid out left to right to match a reference Google TV
++     Home screenshot:
++       [search+Home+Live+Apps, one translucent pill group]  ....
++       .... [assistant+home+settings, a second translucent pill group]  ....  [clock] [app name]
++
++     Two distinct pill layers, both matching the reference: each whole
++     button group sits on its own translucent rounded capsule
++     (top_bar_group_background), and inside the left group the currently
++     focused Home/Live/Apps tab additionally gets its own opaque white
++     pill (top_bar_active_tab_background) on top of that. Confirmed
++     on-device this group-level capsule was the piece missing before: without
++     it the buttons read as loose icons floating on the backdrop instead of
++     a grouped control.
++
++     Deliberately NOT replicated from that reference: a profile avatar
++     circle, since this launcher has no account system. (top_bar_brand did
++     originally show this app's own name instead of "Google TV", since this
++     build isn't Google TV certified; changed back to the literal reference
++     text per explicit user request, on this personal, non-distributed
++     device.)
++     "Live" launches com.android.tv/.TvActivity directly (confirmed via
++     `adb shell cmd package query-activities` to be the actual Live TV
++     activity on this device, isDefault=true for
++     CATEGORY_LEANBACK_LAUNCHER), not a guess. The right-hand "home" icon
++     and the assistant/sparkle icon don't have distinct real destinations
++     of their own here, so they're wired to the same actions as
++     top_bar_home and top_bar_search respectively, see
++     LauncherActivity#setUpTopBar().
++
++     Overlays the top edge of the backdrop (see launcher.xml, added as the
++     last child so it paints above everything). Click handling and the
++     clock are wired up in LauncherActivity. -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/top_bar"
++    android:layout_width="match_parent"
++    android:layout_height="@dimen/top_bar_height"
++    android:layout_gravity="top"
++    android:orientation="horizontal"
++    android:gravity="center_vertical"
++    android:paddingStart="@dimen/overscan_horizontal"
++    android:paddingEnd="@dimen/overscan_horizontal"
++    android:clipToPadding="false"
++    android:clipChildren="false">
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="@dimen/top_bar_group_height"
++        android:orientation="horizontal"
++        android:gravity="center_vertical"
++        android:background="@drawable/top_bar_group_background"
++        android:paddingStart="@dimen/top_bar_group_padding_horizontal"
++        android:paddingEnd="@dimen/top_bar_group_padding_horizontal">
++
++        <!-- Current Google account entry point, matching the avatar circle
++             shown before Search in a reference Google TV Home screenshot.
++             See ic_account.xml for why this is a generic avatar glyph
++             rather than the real account photo. -->
++        <ImageView
++            android:id="@+id/top_bar_account"
++            android:layout_width="@dimen/top_bar_group_height"
++            android:layout_height="@dimen/top_bar_group_height"
++            android:padding="12dp"
++            android:background="@drawable/top_bar_account_background"
++            android:clickable="true"
++            android:focusable="true"
++            android:src="@drawable/ic_account"
++            android:tint="@color/top_bar_text_color"
++            android:contentDescription="@string/top_bar_account_content_description" />
++
++        <ImageView
++            android:id="@+id/top_bar_search"
++            android:layout_width="@dimen/top_bar_icon_size"
++            android:layout_height="@dimen/top_bar_icon_size"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:background="?android:attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true"
++            android:src="@drawable/ic_search"
++            android:tint="@color/top_bar_text_color"
++            android:contentDescription="@string/top_bar_search" />
++
++        <!-- Home/Live/Apps: the pill background + dark bold text is a FOCUS
++             state, not a fixed "current page" indicator, since this launcher
++             has no separate Home/Live/Apps screens, so there's nothing else
++             for it to mean. All three start with identical padding/inactive
++             styling in XML; which one looks "active" is driven purely by real
++             D-pad/touch focus, see LauncherActivity#setUpTopBarTab(). -->
++        <TextView
++            android:id="@+id/top_bar_home"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:paddingStart="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingEnd="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingTop="@dimen/top_bar_pill_padding_vertical"
++            android:paddingBottom="@dimen/top_bar_pill_padding_vertical"
++            android:clickable="true"
++            android:focusable="true"
++            android:text="@string/top_bar_home"
++            android:textSize="@dimen/top_bar_text_size"
++            android:textColor="@color/top_bar_text_color_inactive" />
++
++        <TextView
++            android:id="@+id/top_bar_live"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:paddingStart="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingEnd="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingTop="@dimen/top_bar_pill_padding_vertical"
++            android:paddingBottom="@dimen/top_bar_pill_padding_vertical"
++            android:clickable="true"
++            android:focusable="true"
++            android:text="@string/top_bar_live"
++            android:textSize="@dimen/top_bar_text_size"
++            android:textColor="@color/top_bar_text_color_inactive" />
++
++        <TextView
++            android:id="@+id/top_bar_apps"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:paddingStart="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingEnd="@dimen/top_bar_pill_padding_horizontal"
++            android:paddingTop="@dimen/top_bar_pill_padding_vertical"
++            android:paddingBottom="@dimen/top_bar_pill_padding_vertical"
++            android:clickable="true"
++            android:focusable="true"
++            android:text="@string/top_bar_apps"
++            android:textSize="@dimen/top_bar_text_size"
++            android:textColor="@color/top_bar_text_color_inactive" />
++    </LinearLayout>
++
++    <!-- Fixed, not flexible: see top_bar_group_gap's comment in dimens.xml
++         for why this differs from the spacer below. -->
++    <View
++        android:layout_width="@dimen/top_bar_group_gap"
++        android:layout_height="1dp" />
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="@dimen/top_bar_group_height"
++        android:orientation="horizontal"
++        android:gravity="center_vertical"
++        android:background="@drawable/top_bar_group_background"
++        android:paddingStart="@dimen/top_bar_group_padding_horizontal"
++        android:paddingEnd="@dimen/top_bar_group_padding_horizontal">
++
++        <ImageView
++            android:id="@+id/top_bar_assistant"
++            android:layout_width="@dimen/top_bar_icon_size"
++            android:layout_height="@dimen/top_bar_icon_size"
++            android:background="?android:attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true"
++            android:src="@drawable/ic_sparkle"
++            android:tint="@color/top_bar_text_color"
++            android:contentDescription="@string/top_bar_assistant_content_description" />
++
++        <ImageView
++            android:id="@+id/top_bar_home_button"
++            android:layout_width="@dimen/top_bar_icon_size"
++            android:layout_height="@dimen/top_bar_icon_size"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:background="?android:attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true"
++            android:src="@drawable/ic_home"
++            android:tint="@color/top_bar_text_color"
++            android:contentDescription="@string/top_bar_home_button_content_description" />
++
++        <ImageView
++            android:id="@+id/top_bar_settings"
++            android:layout_width="@dimen/top_bar_icon_size"
++            android:layout_height="@dimen/top_bar_icon_size"
++            android:layout_marginStart="@dimen/top_bar_tab_spacing"
++            android:background="?android:attr/selectableItemBackground"
++            android:clickable="true"
++            android:focusable="true"
++            android:src="@drawable/ic_gear"
++            android:tint="@color/top_bar_text_color"
++            android:contentDescription="@string/top_bar_settings_content_description" />
++    </LinearLayout>
++
++    <View
++        android:layout_width="0dp"
++        android:layout_height="1dp"
++        android:layout_weight="1" />
++
++    <!-- Clock + app name: plain text, no capsule, matching the reference
++         (only the button groups get the pill treatment there). Same size
++         and muted color on both so they read as one small secondary-info
++         pairing, like "9:02  Google TV" in the reference, rather than the
++         clock looking like a separate, more prominent element. -->
++    <TextClock
++        android:id="@+id/top_bar_clock"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:format12Hour="h:mm"
++        android:format24Hour="HH:mm"
++        android:textSize="@dimen/top_bar_text_size"
++        android:textColor="@color/top_bar_text_color_inactive" />
++
++    <TextView
++        android:id="@+id/top_bar_brand"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginStart="6dp"
++        android:text="@string/top_bar_brand_text"
++        android:textSize="@dimen/top_bar_text_size"
++        android:textColor="@color/top_bar_text_color_inactive" />
++</LinearLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/values/colors.xml b/TvSampleLeanbackLauncher/src/main/res/values/colors.xml
+index b5d956b..2d079f8 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/values/colors.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/values/colors.xml
+@@ -21,6 +21,31 @@
+     <color name="primary_text_color">#e5e5e5</color>
+     <color name="secondary_text_color">#787b7f</color>
+ 
++    <!-- "Favorite Apps"-style rounded tile (launch_item.xml) -->
++    <color name="app_tile_background">#E6FFFFFF</color>
++    <color name="app_tile_background_focused">#FFFFFFFF</color>
++
++    <!-- Hero region (hero_banner.xml) -->
++    <color name="hero_fallback_background">#1A2B42</color>
++    <color name="hero_title_text_color">#FFFFFFFF</color>
++    <color name="hero_subtitle_text_color">#CCFFFFFF</color>
++    <color name="hero_scrim_top">#00000000</color>
++    <color name="hero_scrim_bottom">#CC000000</color>
++
++    <!-- Top bar (top_bar.xml) -->
++    <color name="top_bar_text_color">#FFFFFFFF</color>
++    <color name="top_bar_text_color_inactive">#CCFFFFFF</color>
++    <color name="top_bar_active_pill_background">#FFFFFFFF</color>
++    <color name="top_bar_active_pill_text_color">#1A2B42</color>
++    <!-- The translucent capsule behind a whole button group, distinct from
++         (and underneath) the opaque active-tab pill above. -->
++    <color name="top_bar_group_background">#26FFFFFF</color>
++    <!-- Permanent muted fill behind top_bar_account, see
++         top_bar_account_background.xml. Brighter than top_bar_group_background
++         so the avatar chip still reads as a distinct filled circle against
++         the group's own translucent pill, not just more of the same tint. -->
++    <color name="top_bar_account_background">#40FFFFFF</color>
++
+     <color name="notification_text_color">#787b7f</color>
+     <color name="notification_background">#FFCCCCCC</color>
+     <color name="notification_heads_up_decorator">#1784d7</color>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml b/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
+index 8936f39..98ac19d 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
+@@ -21,11 +21,96 @@
+ 
+     <dimen name="app_item_width">190dp</dimen>
+     <dimen name="app_item_height">120dp</dimen>
+-    <dimen name="app_item_padding">15dp</dimen>
++    <!-- Was 15dp, sized for the old 96dp/120dp tiles. At the smaller 76dp
++         square tile (see circular_tile_size) that left extra dead space
++         inside each row's fixed circular_row_item_height cell, pushing the
++         bottom row up off the true bottom edge; confirmed by measuring
++         the screenshot's actual bottom pixel margin (~85px/1080, notably
++         more than overscan_vertical alone accounts for). 8dp makes
++         circular_tile_size + 2*this exactly equal circular_row_item_height
++         (76+16=92dp), so there's no leftover slack. -->
++    <dimen name="app_item_padding">8dp</dimen>
+     <dimen name="app_row_title_text_size">20sp</dimen>
+     <dimen name="app_row_title_padding">5dp</dimen>
+-    <dimen name="app_icon_size">48dp</dimen>
+-    <dimen name="app_icon_margin">10dp</dimen>
++
++    <!-- "Favorite Apps"-style rounded tile (launch_item.xml) -->
++    <dimen name="app_tile_size">120dp</dimen>
++    <dimen name="app_tile_corner_radius">20dp</dimen>
++    <dimen name="app_label_margin_top">8dp</dimen>
++    <item name="app_tile_focused_zoom" type="fraction">108%</item>
++    <item name="app_tile_scale_duration_ms" type="integer">150</item>
++
++    <!-- "Your Apps"-style circular icon tile (launch_item_circular.xml).
++         Measured ~14% of screen height in the reference (was 96dp/56dp,
++         visibly larger relative to the screen than the reference's icon
++         row). -->
++    <dimen name="circular_tile_size">76dp</dimen>
++    <dimen name="circular_icon_size">44dp</dimen>
++    <!-- app_launch_row.xml's HorizontalGridView height for a circular row,
++         set from code (AppFragment#onCreateView()) instead of app_item_height
++         (120dp), which is sized for the square launch_item.xml tile that's
++         effectively unused now. Left at 120dp that fixed height didn't
++         shrink along with circular_tile_size, wasting ~44dp of vertical
++         space per row; with 2 stacked circular rows (see
++         aosp_rpi4_tv-launcher-ui-plan.md section 11) that pushed the row
++         stack up into the hero subtitle text, confirmed on-device as a
++         visible overlap. -->
++    <dimen name="circular_row_item_height">92dp</dimen>
++
++    <!-- Top bar (top_bar.xml): Search/Home/Apps tabs + Settings + clock,
++         fixed above everything including the hero. Sizes below were
++         measured as fractions of width/height directly off a reference
++         Google TV Home screenshot (fractions, not absolute px, since the
++         screenshot's native resolution is unknown) and re-applied to this
++         1920x1080 screen; see aosp_rpi4_tv-launcher-ui-plan.md section 11
++         for the measurements. -->
++    <dimen name="top_bar_height">64dp</dimen>
++    <!-- Was 24dp: measured icon diameter in the reference is closer to 3%
++         of screen height (~16dp on this screen) than 24dp; split the
++         difference at 20dp rather than going all the way down, since 16dp
++         reads as too small a D-pad focus target on an actual TV. -->
++    <dimen name="top_bar_icon_size">20dp</dimen>
++    <dimen name="top_bar_text_size">16sp</dimen>
++    <dimen name="top_bar_clock_text_size">18sp</dimen>
++    <dimen name="top_bar_tab_spacing">24dp</dimen>
++    <dimen name="top_bar_search_icon_label_spacing">8dp</dimen>
++    <dimen name="top_bar_pill_radius">24dp</dimen>
++    <dimen name="top_bar_pill_padding_horizontal">18dp</dimen>
++    <dimen name="top_bar_pill_padding_vertical">8dp</dimen>
++    <!-- The translucent capsule wrapping a whole button group (see
++         top_bar_group_background.xml), around its own children. A fixed
++         height (not wrap_content) is deliberate: the left group's tabs
++         have their own inner pill padding and the right group is just
++         bare icons, so left to wrap_content the two capsules came out
++         different heights, confirmed wrong against a reference screenshot
++         where both are the same pill height. -->
++    <dimen name="top_bar_group_padding_horizontal">10dp</dimen>
++    <dimen name="top_bar_group_padding_vertical">6dp</dimen>
++    <!-- Measured ~9% of screen height in the reference (was 56dp). -->
++    <dimen name="top_bar_group_height">48dp</dimen>
++    <!-- Half of top_bar_group_height, so the capsule's ends are fully
++         round rather than just rounded-rectangle corners. -->
++    <dimen name="top_bar_group_radius">24dp</dimen>
++    <!-- Fixed gap between the left (Search/Home/Live/Apps) and right
++         (sparkle/home/gear) pill groups. Was a flexible layout_weight="1"
++         spacer, same as the one after the right group; that put two
++         equal flexible gaps around the right group, centering it in the
++         middle of the top bar. Measured against the reference, that gap is
++         small and fixed (~5% of width) while nearly all the remaining
++         empty space sits between the right group and the clock, which is
++         what the *second* spacer (still layout_weight="1") is for. -->
++    <dimen name="top_bar_group_gap">48dp</dimen>
++
++    <!-- Hero region (hero_banner.xml), fixed above the scrolling rows.
++         hero_height increased from 216dp: measured title block position in
++         the reference sits lower, around 33%-44% of screen height, not
++         21%-30%. -->
++    <dimen name="hero_height">266dp</dimen>
++    <dimen name="hero_fallback_icon_size">96dp</dimen>
++    <dimen name="hero_title_text_size">36sp</dimen>
++    <dimen name="hero_subtitle_text_size">18sp</dimen>
++    <dimen name="hero_text_margin_bottom">28dp</dimen>
++    <dimen name="app_icon_size">72dp</dimen>
+ 
+     <dimen name="search_row_height">108dp</dimen>
+     <dimen name="search_row_padding_start">56dp</dimen>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/values/ids.xml b/TvSampleLeanbackLauncher/src/main/res/values/ids.xml
+index 41a3670..bf1ba1a 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/values/ids.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/values/ids.xml
+@@ -19,4 +19,5 @@
+     <item type="id" name="apps_row"/>
+     <item type="id" name="games_row"/>
+     <item type="id" name="settings_row"/>
++    <item type="id" name="your_apps_row"/>
+ </resources>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/values/strings.xml b/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
+index 86d3d79..753ed85 100644
+--- a/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
++++ b/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
+@@ -16,12 +16,27 @@
+ 
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="app_name">Sample Leanback Launcher</string>
+-    <string name="apps_row_title">Apps</string>
++    <string name="apps_row_title">Favorite Apps</string>
+     <string name="games_row_title">Games</string>
+     <string name="settings_row_title">Settings</string>
++    <string name="your_apps_row_title">Your Apps</string>
+ 
+     <string name="network_settings_disconnected">Network Settings</string>
+ 
++    <!-- Top bar (top_bar.xml) -->
++    <string name="top_bar_account_content_description">Account</string>
++    <string name="top_bar_search">Search</string>
++    <string name="top_bar_home">Home</string>
++    <string name="top_bar_live">Live</string>
++    <string name="top_bar_apps">Apps</string>
++    <string name="top_bar_assistant_content_description">Assistant</string>
++    <string name="top_bar_home_button_content_description">Home</string>
++    <string name="top_bar_settings_content_description">Settings</string>
++    <!-- Per user request on 2026-08-12 (personal, non-distributed device):
++         match the reference screenshot's literal brand text here instead
++         of this launcher's own app_name. -->
++    <string name="top_bar_brand_text">Google TV</string>
++
+     <string name="app_unavailable">Application unavailable</string>
+ 
+     <string name="search_click_to_speak">Click to speak</string>
