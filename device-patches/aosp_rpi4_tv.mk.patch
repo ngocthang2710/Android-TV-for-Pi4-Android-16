@@ -1,8 +1,8 @@
 diff --git a/aosp_rpi4_tv.mk b/aosp_rpi4_tv.mk
-index 5939069..1fda406 100644
+index 5939069..ca4b001 100644
 --- a/aosp_rpi4_tv.mk
 +++ b/aosp_rpi4_tv.mk
-@@ -23,6 +23,15 @@ PRODUCT_PACKAGES += \
+@@ -23,6 +23,21 @@ PRODUCT_PACKAGES += \
      TvSampleLeanbackLauncher \
      TvSettingsTwoPanel
  
@@ -15,10 +15,16 @@ index 5939069..1fda406 100644
 +PRODUCT_PACKAGES += \
 +    VtvTvInput
 +
++# YouTube for the launcher's app row: a WebView wrapper around
++# youtube.com/tv (no GMS on this AOSP build, see
++# packages/apps/YouTubeTv/AndroidManifest.xml for why).
++PRODUCT_PACKAGES += \
++    YouTubeTv
++
  # Bluetooth
  PRODUCT_VENDOR_PROPERTIES += \
      bluetooth.device.class_of_device=34,4,36
-@@ -44,6 +53,12 @@ PRODUCT_PACKAGES += \
+@@ -44,6 +59,12 @@ PRODUCT_PACKAGES += \
      SettingsProviderTvRpiOverlay \
      WifiRpiOverlay
  

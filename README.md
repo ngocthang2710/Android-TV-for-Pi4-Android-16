@@ -30,6 +30,8 @@ product/form-factor.
   small standalone channel-picker app. See below.
 - Home screen re-skinned to a Google TV Home style layout (top nav bar,
   focus-driven hero background, a single circular app-icon row). See below.
+- YouTube, added to the app row -- a WebView wrapper, since this AOSP
+  build has no GMS/Play Services to run the real app. See below.
 
 ## Feature: home screen re-skin (Google TV Home style)
 
@@ -107,6 +109,65 @@ background updates on focus change with no seam, all top bar buttons show
 a clear focus indicator, the app row never loses an icon after returning
 from a launched app, and everything fits one 1920x1080 screen with no
 scrolling.
+
+## Feature: YouTube
+
+### What it does
+Adds a "YouTube" icon to the launcher's app row. This AOSP build has no
+GMS/Play Services, so the real closed-source YouTube app (which also
+needs Google TV certification) can't be built or installed here. Instead
+`packages/apps/YouTubeTv` is a thin WebView wrapper around
+`https://www.youtube.com/tv` -- YouTube's own official web client built
+for TV remotes/D-pads (the same URL Chromecast/older Google TV boxes'
+web-based clients used before a native app existed), not a scrape or
+reverse-engineered client.
+
+| | |
+|---|---|
+| ![Launcher with YouTube icon](docs/screenshots/youtube-01-launcher-icon.png) | Shows up in the app row automatically -- it just declares the `LEANBACK_LAUNCHER` category like any other app; no launcher-side changes needed. |
+| ![YouTube TV home](docs/screenshots/youtube-02-home.png) | youtube.com/tv's real home feed, D-pad navigable out of the box. |
+| ![Real video playback](docs/screenshots/youtube-03-playback.png) | Real playback, not just the landing page -- ads, then the selected video. |
+| ![Back returns to home](docs/screenshots/youtube-04-back-to-home.png) | BACK returns to YouTube's own home screen first, matching how the real app behaves (see the BACK-button bugs below for why that took more than it looks). |
+
+### Real bugs hit building this, and their fixes
+
+**1. BACK exited the whole app on the first press**, instead of going
+back within the page. Root cause: this app targets a modern SDK, so the
+platform's default Predictive Back callback intercepts `KEYCODE_BACK`
+before `Activity.onKeyDown()` ever sees it and just finishes the Activity
+outright. Fixed with `android:enableOnBackInvokedCallback="false"` in the
+manifest, opting back into the legacy dispatch.
+
+**2. `WebView.canGoBack()`/`goBack()` (even jumping several history steps
+at once via `goBackOrForward()`) turned out to be fundamentally the wrong
+tool for this site, not just slow.** youtube.com/tv is a single-page app;
+some screens (e.g. "Add your Google Account") are a client-side
+route/overlay change with no real browser-history entry at all, so
+`canGoBack()` was `false` even though the page had its own "back" to do.
+Worse, even when a history entry *did* exist, jumping straight to it via
+`goBackOrForward()` was unreliable: the URL/`WebBackForwardList` updated
+correctly but the page's own client-side router didn't always repaint to
+match, confirmed on-device repeatedly with waits up to 6 seconds -- not a
+one-off, it reproduced across multiple separate attempts. The reliable
+fix ended up being to not touch WebView history at all: compare the
+current URL against the home URL (accounting for youtube.com/tv's
+hash-based routing, e.g. `#/watch?v=...`, where the path stays constant
+and only the fragment changes) and force a real `WebView.loadUrl()` back
+to the home URL when not already there -- a full navigation the page
+can't fail to react to. A defensive Escape-key dispatch (the convention
+TV-oriented JS apps listen for from a remote's Back button) stays as a
+fallback for the no-URL-change overlay case, with a "press back again to
+exit" double-tap safety net for when there's truly nothing left to do.
+
+### Result (verified on real hardware)
+Real playback confirmed (not just the landing page): opening a
+recommended video plays a skippable ad, then the video itself, with
+audio, tracked via `cr_MediaCodecBridge`/`MediaCodec` log lines. BACK
+tested repeatedly (3 separate trials, each from a freshly opened video,
+with waits up to 10s before checking): 1 press reliably returns to
+YouTube's own home screen, a 2nd press reliably exits to the launcher --
+confirmed via `dumpsys window`'s `mCurrentFocus` at each step, not just a
+screenshot glance.
 
 ## Feature: VTV live TV channels
 
@@ -296,10 +357,10 @@ be split as one narrow `AndroidManifest.xml.patch`; consolidated into a
 single whole-directory patch once the re-skin touched far more than the
 manifest.
 
-### `packages/apps/VtvTvInput/` -- new app; the path in this repo *is* the path it installs to
+### `packages/apps/VtvTvInput/`, `packages/apps/YouTubeTv/` -- new apps; the path in this repo *is* the path each installs to
 
-Plain file copy (`cp -r`, not a patch) of the whole `VtvTvInput` Soong
-module: `Android.bp`, `AndroidManifest.xml`, `res/`, `src/`.
+Plain file copies (`cp -r`, not patches) of each whole Soong module:
+`Android.bp`, `AndroidManifest.xml`, `res/`, `src/`.
 
 ## Building
 
@@ -312,6 +373,7 @@ cd <AOSP_ROOT>/device/google/atv/TvSampleLeanbackLauncher
 git apply <THIS_REPO>/device-patches/TvSampleLeanbackLauncher.patch
 
 cp -r <THIS_REPO>/packages/apps/VtvTvInput <AOSP_ROOT>/packages/apps/
+cp -r <THIS_REPO>/packages/apps/YouTubeTv <AOSP_ROOT>/packages/apps/
 
 cd <AOSP_ROOT>
 source build/envsetup.sh
@@ -319,9 +381,9 @@ lunch aosp_rpi4_tv bp4a userdebug
 m systemimage vendorimage   # or just `m` for a full build
 ```
 
-Product packages `LiveTvNonPassthrough` and `VtvTvInput` are already added
-to `PRODUCT_PACKAGES` by the `aosp_rpi4_tv.mk.patch` above -- no separate
-`lunch`/menuconfig step needed for them.
+Product packages `LiveTvNonPassthrough`, `VtvTvInput`, and `YouTubeTv` are
+already added to `PRODUCT_PACKAGES` by the `aosp_rpi4_tv.mk.patch` above --
+no separate `lunch`/menuconfig step needed for them.
 
 ## License
 

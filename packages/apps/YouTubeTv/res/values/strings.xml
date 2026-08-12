@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YouTube</string>
+    <!-- YouTube's own TV-optimized web interface, built for D-pad/remote
+         navigation (the same URL Chromecast/older Google TV web clients
+         used before a native app existed). -->
+    <string name="youtube_tv_url" translatable="false">https://www.youtube.com/tv</string>
+</resources>

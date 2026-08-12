@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  YouTube for this launcher's "Your Apps" row. This AOSP build has no GMS/
+  Play Services, so the real closed-source YouTube app (which also needs
+  Google TV certification) can't be built or installed here. Instead this
+  is a thin WebView wrapper around https://www.youtube.com/tv; YouTube's
+  own official web interface built for TV remotes/D-pads, not a scrape or
+  reverse-engineered client. User explicitly asked for this on a personal,
+  non-distributed device (same basis as top_bar_brand_text in
+  TvSampleLeanbackLauncher showing the literal "Google TV" text).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rpi4tv.youtubetv">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
