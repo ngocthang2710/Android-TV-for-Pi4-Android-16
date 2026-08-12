@@ -191,6 +191,7 @@ work.
 | ![Spotify landing page](docs/screenshots/spotify-02-landing.png) | open.spotify.com's real logged-out landing page, region-appropriate trending content. |
 | ![Spotify login form](docs/screenshots/spotify-03-login.png) | Reached via the hamburger menu -> "Log in"; the real login form renders correctly, including "Continue with phone number"/"Continue with Google". |
 | ![On-screen keyboard input](docs/screenshots/spotify-04-keyboard-input.png) | Typing into the email field works -- the on-screen keyboard (IME) pops up and input lands correctly. |
+| ![Icon updated to match the real logo](docs/screenshots/spotify-05-icon-update.png) | `res/mipmap-xxxhdpi/ic_launcher.png` redrawn to match Spotify's actual mark (black rounded square, green circle, 3-arc "sound wave"), replacing an earlier generic placeholder icon, per user request. |
 
 ### Notable differences from YouTubeTv
 - **User agent**: strips `"; wv"` (the literal WebView marker Chrome's
