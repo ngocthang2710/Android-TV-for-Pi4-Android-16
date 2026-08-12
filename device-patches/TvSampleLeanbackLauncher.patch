@@ -44,10 +44,10 @@ index 070967b..24ac12e 100644
          android:allowBackup="true"
          android:icon="@mipmap/ic_launcher"
 diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-index b14ac59..84301f9 100644
+index b14ac59..c511951 100644
 --- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
 +++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-@@ -17,42 +17,258 @@
+@@ -17,42 +17,340 @@
  package com.example.sampleleanbacklauncher;
  
  import android.app.Activity;
@@ -62,8 +62,11 @@ index b14ac59..84301f9 100644
  import android.os.Bundle;
 +import android.provider.Settings;
 +import android.util.Log;
++import android.view.Gravity;
 +import android.view.View;
++import android.view.ViewGroup;
 +import android.widget.ImageView;
++import android.widget.LinearLayout;
 +import android.widget.TextView;
 +import android.widget.Toast;
  
@@ -78,6 +81,27 @@ index b14ac59..84301f9 100644
 +    // software blur library: available unconditionally on this API level,
 +    // no new build dependency.
 +    private static final float BACKDROP_BLUR_RADIUS_PX = 80f;
++
++    // VtvTvInput's package, used by onItemFocused() to tell VTV's tile
++    // apart from every other app row item -- see content_preview.xml.
++    private static final String VTV_PACKAGE_NAME = "com.rpi4tv.vtvinput";
++
++    // Mirrors VtvTvInput's VtvChannels.ALL (packages/apps/VtvTvInput/src/
++    // com/rpi4tv/vtvinput/VtvChannels.java), duplicated here rather than
++    // shared since it's a separate Soong module/APK with no way for this
++    // launcher to import its Java classes. Only the number/name are needed
++    // here (content_preview_channels is a label row, not a tuner), so this
++    // is deliberately NOT read from TvProvider: that would need this
++    // (already-privileged) app to also hold READ_EPG_DATA, and this
++    // product has already hit one real bug where a *new*
++    // default-permissions.xml grant silently doesn't take effect on a
++    // build re-flashed over existing userdata without a fingerprint
++    // change (see this repo's Wi-Fi SSID fix write-up) -- not worth
++    // risking that again just to avoid a 9-line duplicated array. Keep
++    // this in sync with VtvChannels.ALL if the channel lineup changes.
++    private static final String[] VTV_CHANNEL_NAMES = {
++        "VTV1", "VTV2", "VTV3", "VTV4", "VTV5", "VTV6", "VTV7", "VTV8", "VTV9",
++    };
  
 -public class LauncherActivity extends Activity {
      private SystemUpdateChecker mSystemUpdateChecker;
@@ -89,6 +113,11 @@ index b14ac59..84301f9 100644
 +    private ImageView mHeroBackdropImage;
 +    private View mHeroBackdropScrim;
 +    private View mHeroBackdropScrimHorizontal;
++    private View mContentPreview;
++    private View mContentPreviewChannels;
++    private View mContentPreviewAppCard;
++    private ImageView mContentPreviewAppIcon;
++    private TextView mContentPreviewAppLabel;
 +
      @Override
      protected void onCreate(Bundle savedInstanceState) {
@@ -110,6 +139,13 @@ index b14ac59..84301f9 100644
 +        // onItemFocused() below fires from the row.
 +        mHeroTitle.setText(R.string.app_name);
 +        mHeroFallbackIcon.setImageResource(R.mipmap.ic_launcher);
++
++        mContentPreview = findViewById(R.id.content_preview);
++        mContentPreviewChannels = findViewById(R.id.content_preview_channels);
++        mContentPreviewAppCard = findViewById(R.id.content_preview_app_card);
++        mContentPreviewAppIcon = findViewById(R.id.content_preview_app_icon);
++        mContentPreviewAppLabel = findViewById(R.id.content_preview_app_label);
++        populateVtvChannelPreview();
 +
 +        setUpTopBar();
 +
@@ -292,6 +328,12 @@ index b14ac59..84301f9 100644
 +     * full-screen one behind it, which produced a hard visible seam where
 +     * the sharp box ended and the blurred area began -- looked like two
 +     * stacked images instead of one continuous photo. Confirmed on-device.
++     *
++     * <p>content_preview (see content_preview.xml) also follows focus the
++     * same way, filling the empty middle of the screen: VTV's real
++     * channel row for VTV, a plain icon+name card for everything else,
++     * since no other app here exposes real "suggested content" this
++     * launcher process can read.
 +     */
 +    @Override
 +    public void onItemFocused(LaunchItem item, CharSequence rowTitle) {
@@ -314,6 +356,46 @@ index b14ac59..84301f9 100644
 +            mHeroBackdropScrimHorizontal.setVisibility(View.GONE);
 +            mHeroFallbackIcon.setImageDrawable(item.getIcon());
 +            mHeroFallbackIcon.setVisibility(View.VISIBLE);
++        }
++
++        final ComponentName component = item.getIntent().getComponent();
++        final boolean isVtv = component != null
++                && VTV_PACKAGE_NAME.equals(component.getPackageName());
++        mContentPreview.setVisibility(View.VISIBLE);
++        mContentPreviewChannels.setVisibility(isVtv ? View.VISIBLE : View.GONE);
++        mContentPreviewAppCard.setVisibility(isVtv ? View.GONE : View.VISIBLE);
++        if (!isVtv) {
++            mContentPreviewAppIcon.setImageDrawable(item.getIcon());
++            mContentPreviewAppLabel.setText(item.getLabel());
++        }
++    }
++
++    /**
++     * Fills content_preview_channels with a static VTV1-9 row -- built
++     * once here since the lineup never changes at runtime, then just
++     * shown/hidden per focus in onItemFocused(). Plain text tiles, not
++     * banner images: VtvTvInput has no per-channel logo assets (see
++     * VTV_CHANNEL_NAMES's comment), and a real channel number/name is
++     * still real data, not a placeholder.
++     */
++    private void populateVtvChannelPreview() {
++        final LinearLayout row = (LinearLayout) mContentPreviewChannels;
++        final float density = getResources().getDisplayMetrics().density;
++        for (String name : VTV_CHANNEL_NAMES) {
++            final TextView tile = new TextView(this);
++            tile.setText(name);
++            tile.setTextSize(16);
++            tile.setTypeface(tile.getTypeface(), Typeface.BOLD);
++            tile.setTextColor(getColor(R.color.hero_title_text_color));
++            tile.setGravity(Gravity.CENTER);
++            tile.setBackground(getDrawable(R.drawable.content_preview_card_background));
++            final int paddingH = Math.round(20 * density);
++            final int paddingV = Math.round(14 * density);
++            tile.setPadding(paddingH, paddingV, paddingH, paddingV);
++            final LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
++                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
++            params.setMarginEnd(Math.round(12 * density));
++            row.addView(tile, params);
 +        }
 +    }
 +
@@ -794,6 +876,37 @@ index 0000000..46f6acd
 +    android:shape="oval">
 +    <solid android:color="@color/app_tile_background_focused" />
 +</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background.xml
+new file mode 100644
+index 0000000..1b50de9
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background.xml
+@@ -0,0 +1,25 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Same translucent-pill visual language as top_bar_group_background.xml,
++     reused here for content_preview.xml's channel tiles and app card so
++     the whole screen reads as one consistent style. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/top_bar_group_background" />
++    <corners android:radius="16dp" />
++</shape>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml
 new file mode 100644
 index 0000000..09530ed
@@ -1193,6 +1306,94 @@ index 0000000..e50330b
 +    <solid android:color="@color/top_bar_group_background" />
 +    <corners android:radius="@dimen/top_bar_group_radius" />
 +</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
+new file mode 100644
+index 0000000..b9a9fa7
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
+@@ -0,0 +1,82 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Fills the empty middle of the screen (between the hero title and the
++     app row) with something contextual to whichever app tile currently
++     has D-pad focus, matching a reference Google TV Home screenshot's
++     "Top picks for you" row, but with real data only, never a
++     fabricated content list. See LauncherActivity#onItemFocused().
++
++     Exactly one of the two children below is visible at a time:
++     - content_preview_channels: VTV's real channel lineup (VTV1-9), since
++       that's the one app here with real structured content data this
++       launcher can read.
++     - content_preview_app_card: every other app (the WebView-wrapped
++       YouTube/Spotify/Netflix/CH Play, Settings, Live Channels, etc.);
++       none of those expose any real "suggested content" API this
++       launcher process could read, so this is a plain icon+name card,
++       not an invented content list.
++
++     Not focusable itself, same as the hero backdrop it sits above:
++     purely reactive to the app row's own focus, so it doesn't change
++     D-pad flow at all. -->
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/content_preview"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:layout_marginBottom="24dp"
++    android:paddingStart="@dimen/overscan_horizontal"
++    android:paddingEnd="@dimen/overscan_horizontal"
++    android:clipChildren="false"
++    android:clipToPadding="false"
++    android:visibility="gone">
++
++    <LinearLayout
++        android:id="@+id/content_preview_channels"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:orientation="horizontal"
++        android:visibility="gone" />
++
++    <LinearLayout
++        android:id="@+id/content_preview_app_card"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:orientation="horizontal"
++        android:gravity="center_vertical"
++        android:background="@drawable/content_preview_card_background"
++        android:paddingStart="20dp"
++        android:paddingEnd="28dp"
++        android:paddingTop="14dp"
++        android:paddingBottom="14dp"
++        android:visibility="gone">
++
++        <ImageView
++            android:id="@+id/content_preview_app_icon"
++            android:layout_width="56dp"
++            android:layout_height="56dp" />
++
++        <TextView
++            android:id="@+id/content_preview_app_label"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="16dp"
++            android:textSize="20sp"
++            android:textColor="@color/hero_title_text_color"
++            android:textStyle="bold" />
++    </LinearLayout>
++</FrameLayout>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/hero_banner.xml b/TvSampleLeanbackLauncher/src/main/res/layout/hero_banner.xml
 new file mode 100644
 index 0000000..4091ce2
@@ -1404,10 +1605,10 @@ index 0000000..10f9254
 +        android:layout_gravity="center" />
 +</FrameLayout>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
-index 1b05005..bf843ba 100644
+index 1b05005..bd366d4 100644
 --- a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
 +++ b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
-@@ -14,6 +14,22 @@
+@@ -14,6 +14,25 @@
    ~ See the License for the specific language governing permissions and
    ~ limitations under the License
    -->
@@ -1421,16 +1622,19 @@ index 1b05005..bf843ba 100644
 +          confirmed wrong on-device. See hero_banner.xml, which now only
 +          positions text over this, no image of its own.
 +       2. hero_banner.xml : title/subtitle text positioning.
-+       3. launcher_container : the app row, pinned to the BOTTOM of the
-+          screen via layout_gravity, not flowing immediately after the
-+          hero. With only one row (see LauncherActivity, ROW_TYPE_ALL)
-+          this fits with room to spare, so there's no ScrollView here
-+          anymore; the empty middle is exactly where hero_backdrop shows.
++       3. bottom_stack : content_preview (see content_preview.xml; real
++          VTV channel lineup when VTV has focus, a generic icon+name card
++          for every other app, never fabricated content) stacked directly
++          above launcher_container (the app row), both pinned to the
++          BOTTOM of the screen as one block. Used to be just
++          launcher_container alone with content_preview not existing yet;
++          the empty middle between the hero text and the app row is what
++          content_preview now fills when something is focused.
 +       4. top_bar.xml : fixed nav bar, always on top. -->
  <FrameLayout
      xmlns:android="http://schemas.android.com/apk/res/android"
      android:id="@+id/mostly_transparent_wrapper"
-@@ -21,21 +37,56 @@
+@@ -21,21 +40,67 @@
      android:layout_height="match_parent"
      android:clipToPadding="false"
      android:clipChildren="false">
@@ -1479,7 +1683,7 @@ index 1b05005..bf843ba 100644
 +    <include layout="@layout/hero_banner" />
 +
 +    <LinearLayout
-+        android:id="@+id/launcher_container"
++        android:id="@+id/bottom_stack"
 +        android:layout_width="match_parent"
 +        android:layout_height="wrap_content"
 +        android:layout_gravity="bottom"
@@ -1488,15 +1692,20 @@ index 1b05005..bf843ba 100644
 +        android:orientation="vertical"
          android:clipChildren="false"
 -        android:scrollbars="none">
--        <LinearLayout
--            android:id="@+id/launcher_container"
--            android:layout_width="match_parent"
--            android:layout_height="wrap_content"
--            android:orientation="vertical"
--            android:clipChildren="false"
++        android:clipToPadding="false">
++
++        <include layout="@layout/content_preview" />
++
+         <LinearLayout
+             android:id="@+id/launcher_container"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+             android:orientation="vertical"
+             android:clipChildren="false"
 -            android:clipToPadding="false"/>
 -    </ScrollView>
-+        android:clipToPadding="false" />
++            android:clipToPadding="false" />
++    </LinearLayout>
 +
 +    <include layout="@layout/top_bar" />
  </FrameLayout>

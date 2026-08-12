@@ -118,6 +118,46 @@ a clear focus indicator, the app row never loses an icon after returning
 from a launched app, and everything fits one 1920x1080 screen with no
 scrolling.
 
+### Sub-feature: focus-driven content preview (fills the empty middle)
+A reference Google TV Home screenshot's middle area isn't empty -- it has
+a "Top picks for you" content row. This launcher has no real source for
+that (no app here exposes a real "suggested content" API it could read),
+so instead of a fabricated content list, `content_preview.xml` reacts to
+whichever app tile has D-pad focus with **real data where it exists, a
+plain info card everywhere else**:
+
+- **VTV focused**: the real VTV1-9 channel lineup, as text tiles (no
+  logo assets exist for these channels, but the real channel numbers/
+  names are still real data, not a placeholder).
+- **Every other app focused** (the WebView-wrapped YouTube/Spotify/
+  Netflix/CH Play, Settings, Live Channels, etc.): a plain icon+name
+  card, since none of those expose any content list this launcher
+  process can actually read.
+
+Not focusable itself -- purely reactive to the app row's own focus, same
+as the hero backdrop, so it doesn't change D-pad flow at all.
+
+| | |
+|---|---|
+| ![Generic app card](docs/screenshots/content-preview-01-app-card.png) | YouTube focused: icon + name card, the generic case. |
+| ![Real VTV channel row](docs/screenshots/content-preview-02-vtv-channels.png) | VTV focused: the real VTV1-9 lineup instead of the generic card. |
+| ![Settings card](docs/screenshots/content-preview-03-settings-card.png) | Settings focused: card updates correctly for non-streaming app-row items too. |
+| ![Netflix card](docs/screenshots/content-preview-04-netflix-card.png) | Netflix focused: confirms the card tracks focus correctly across the whole row, not just adjacent items. |
+
+VTV's channel list is a small hardcoded array in `LauncherActivity`
+mirroring `VtvTvInput`'s `VtvChannels.ALL`, deliberately **not** read live
+from `TvContract`/`TvProvider`: that would need this launcher to also
+hold `READ_EPG_DATA`, and this product already hit one real bug where a
+*new* `default-permissions.xml` grant silently doesn't take effect on a
+build re-flashed over existing userdata without a `Build.FINGERPRINT`
+change (see the Wi-Fi SSID fix below) -- not worth risking that again to
+avoid a 9-line duplicated array.
+
+Verified on real hardware: stepping D-pad focus across the whole app row
+(YouTube -> VTV -> Settings -> ... -> Netflix) updates the middle area
+correctly every time -- real channel row for VTV, correct icon/name card
+for everything else, no crash.
+
 ## Feature: YouTube
 
 ### What it does
