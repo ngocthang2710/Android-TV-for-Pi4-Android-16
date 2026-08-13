@@ -158,6 +158,37 @@ Verified on real hardware: stepping D-pad focus across the whole app row
 correctly every time -- real channel row for VTV, correct icon/name card
 for everything else, no crash.
 
+#### VTV channel tiles: made bigger and genuinely clickable
+User feedback: the middle of the screen still felt too empty, and asked
+for something inviting to click there. The VTV row is the one place with
+real per-item content to make actionable rather than decorative, so:
+
+- Tiles are larger (20sp text, more padding) with a real focus state
+  (solid white background + dark text + a slight scale-up, the same
+  focus language used everywhere else on this screen).
+- Clicking/`DPAD_CENTER` on a tile tunes that exact channel directly via
+  `VtvPlayerActivity`, skipping `VtvChannelListActivity`'s grid screen
+  entirely. Needed `VtvPlayerActivity`'s `android:exported` flipped from
+  `false` to `true` in `VtvTvInput` -- safe, since the only input it
+  takes is a channel number string, the same data `VtvChannelListActivity`
+  already passes it from inside that app.
+- **Bug found at the larger tile size**: all 9 tiles no longer fit a
+  1920px-wide screen -- VTV8/9 were pushed off-screen with no way to
+  reach them. Fixed by wrapping the row in a `HorizontalScrollView`
+  (was a bare `LinearLayout`), which auto-scrolls a focused off-screen
+  tile into view for free.
+
+| | |
+|---|---|
+| ![Larger VTV tiles](docs/screenshots/content-preview-05-vtv-larger-tiles.png) | Bigger tiles; VTV8 is right at the edge, VTV9 still off-screen. |
+| ![Tile focus state](docs/screenshots/content-preview-06-vtv-tile-focus.png) | `DPAD_UP` from the VTV app-row icon reaches the tiles via plain default focus search, no custom wiring; VTV2 shown focused. |
+| ![Auto-scroll to VTV9](docs/screenshots/content-preview-07-vtv-autoscroll.png) | 7 more `DPAD_RIGHT` presses later: the `HorizontalScrollView` scrolled VTV9 fully into view automatically. |
+| ![VTV9 actually tuned](docs/screenshots/content-preview-08-vtv-tuned-real-channel.png) | `DPAD_CENTER` on VTV9 -- really playing VTV9 (confirmed both by `dumpsys window`'s `mCurrentFocus` showing `VtvPlayerActivity` and the on-screen program, "Bí mật thế kỷ"). |
+
+Verified on real hardware end to end: `DPAD_UP` from the app row reaches
+the tiles, `DPAD_RIGHT` x7 auto-scrolls from VTV2 to VTV9, `DPAD_CENTER`
+tunes the exact channel tapped -- no crash, no `SecurityException`.
+
 ## Feature: YouTube
 
 ### What it does

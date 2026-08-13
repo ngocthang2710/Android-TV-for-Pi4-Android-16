@@ -44,10 +44,10 @@ index 070967b..24ac12e 100644
          android:allowBackup="true"
          android:icon="@mipmap/ic_launcher"
 diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-index b14ac59..c511951 100644
+index b14ac59..9dd737e 100644
 --- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
 +++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-@@ -17,42 +17,340 @@
+@@ -17,42 +17,381 @@
  package com.example.sampleleanbacklauncher;
  
  import android.app.Activity;
@@ -86,6 +86,16 @@ index b14ac59..c511951 100644
 +    // apart from every other app row item -- see content_preview.xml.
 +    private static final String VTV_PACKAGE_NAME = "com.rpi4tv.vtvinput";
 +
++    // VtvPlayerActivity, made exported=true specifically so this launcher
++    // can jump straight into a channel from a content_preview_channels
++    // tile click, instead of only being reachable via VtvChannelListActivity's
++    // own grid inside that app. Field name mirrors VtvPlayerActivity's own
++    // EXTRA_CHANNEL_NUMBER constant -- can't reference it directly, again a
++    // separate Soong module/APK.
++    private static final ComponentName VTV_PLAYER_COMPONENT =
++            new ComponentName(VTV_PACKAGE_NAME, "com.rpi4tv.vtvinput.VtvPlayerActivity");
++    private static final String VTV_EXTRA_CHANNEL_NUMBER = "channel_number";
++
 +    // Mirrors VtvTvInput's VtvChannels.ALL (packages/apps/VtvTvInput/src/
 +    // com/rpi4tv/vtvinput/VtvChannels.java), duplicated here rather than
 +    // shared since it's a separate Soong module/APK with no way for this
@@ -99,6 +109,8 @@ index b14ac59..c511951 100644
 +    // change (see this repo's Wi-Fi SSID fix write-up) -- not worth
 +    // risking that again just to avoid a 9-line duplicated array. Keep
 +    // this in sync with VtvChannels.ALL if the channel lineup changes.
++    // Index i's real channel number (as VtvChannels.ChannelDef#number,
++    // passed as VTV_EXTRA_CHANNEL_NUMBER) is always i+1 as a string.
 +    private static final String[] VTV_CHANNEL_NAMES = {
 +        "VTV1", "VTV2", "VTV3", "VTV4", "VTV5", "VTV6", "VTV7", "VTV8", "VTV9",
 +    };
@@ -377,21 +389,50 @@ index b14ac59..c511951 100644
 +     * banner images: VtvTvInput has no per-channel logo assets (see
 +     * VTV_CHANNEL_NAMES's comment), and a real channel number/name is
 +     * still real data, not a placeholder.
++     *
++     * <p>Each tile is focusable and clickable, tuning that channel
++     * directly via VTV_PLAYER_COMPONENT on click/DPAD_CENTER -- these used
++     * to be inert labels; user feedback was that the middle of the screen
++     * "quá trống" (too empty) and asked for something inviting to click
++     * here, and this row is the one place on screen with real per-item
++     * content to make genuinely actionable rather than just decorative.
++     * Sized noticeably larger than the old label tiles for the same
++     * reason. D-pad UP from the VTV tile in the app row reaches these via
++     * plain default focus search (nearest focusable view above), same as
++     * how the app row already reaches the top bar; no custom
++     * nextFocusUp/Down wiring needed.
 +     */
 +    private void populateVtvChannelPreview() {
-+        final LinearLayout row = (LinearLayout) mContentPreviewChannels;
++        final LinearLayout row = findViewById(R.id.content_preview_channels_row);
 +        final float density = getResources().getDisplayMetrics().density;
-+        for (String name : VTV_CHANNEL_NAMES) {
++        for (int i = 0; i < VTV_CHANNEL_NAMES.length; i++) {
++            final String name = VTV_CHANNEL_NAMES[i];
++            final String channelNumber = String.valueOf(i + 1);
 +            final TextView tile = new TextView(this);
 +            tile.setText(name);
-+            tile.setTextSize(16);
++            tile.setTextSize(20);
 +            tile.setTypeface(tile.getTypeface(), Typeface.BOLD);
 +            tile.setTextColor(getColor(R.color.hero_title_text_color));
 +            tile.setGravity(Gravity.CENTER);
 +            tile.setBackground(getDrawable(R.drawable.content_preview_card_background));
-+            final int paddingH = Math.round(20 * density);
-+            final int paddingV = Math.round(14 * density);
++            final int paddingH = Math.round(28 * density);
++            final int paddingV = Math.round(20 * density);
 +            tile.setPadding(paddingH, paddingV, paddingH, paddingV);
++            tile.setFocusable(true);
++            tile.setClickable(true);
++            tile.setOnFocusChangeListener((v, hasFocus) -> {
++                tile.setBackground(getDrawable(hasFocus
++                        ? R.drawable.content_preview_card_background_focused
++                        : R.drawable.content_preview_card_background));
++                tile.setTextColor(getColor(hasFocus
++                        ? R.color.top_bar_active_pill_text_color
++                        : R.color.hero_title_text_color));
++                v.animate().scaleX(hasFocus ? 1.08f : 1f).scaleY(hasFocus ? 1.08f : 1f)
++                        .setDuration(150).start();
++            });
++            tile.setOnClickListener(v -> startActivitySafely(new Intent()
++                    .setComponent(VTV_PLAYER_COMPONENT)
++                    .putExtra(VTV_EXTRA_CHANNEL_NUMBER, channelNumber)));
 +            final LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
 +                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
 +            params.setMarginEnd(Math.round(12 * density));
@@ -907,6 +948,39 @@ index 0000000..1b50de9
 +    <solid android:color="@color/top_bar_group_background" />
 +    <corners android:radius="16dp" />
 +</shape>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background_focused.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background_focused.xml
+new file mode 100644
+index 0000000..8eaf07f
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/drawable/content_preview_card_background_focused.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Focus state for content_preview.xml's now-clickable VTV channel
++     tiles: opaque white, same "focused = solid white" language as
++     app_tile_background_focused.xml/circular_tile_background_focused.xml
++     elsewhere on this screen, so a focused channel tile reads as clearly
++     interactive/clickable rather than just a label. -->
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="@color/app_tile_background_focused" />
++    <corners android:radius="16dp" />
++</shape>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml b/TvSampleLeanbackLauncher/src/main/res/drawable/hero_backdrop_scrim.xml
 new file mode 100644
 index 0000000..09530ed
@@ -1308,10 +1382,10 @@ index 0000000..e50330b
 +</shape>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
 new file mode 100644
-index 0000000..b9a9fa7
+index 0000000..b045946
 --- /dev/null
 +++ b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,99 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  ~ Copyright (C) 2026 The Android Open Source Project
@@ -1359,12 +1433,29 @@ index 0000000..b9a9fa7
 +    android:clipToPadding="false"
 +    android:visibility="gone">
 +
-+    <LinearLayout
++    <!-- HorizontalScrollView, not a bare LinearLayout: at the larger tile
++         size used for these (see LauncherActivity#populateVtvChannelPreview()),
++         all 9 VTV tiles don't fit on one 1920px-wide screen; confirmed
++         on-device, VTV8/9 were pushed off-screen with no way to reach
++         them. A focused child that's out of view auto-scrolls into frame
++         via this view's own default behavior, same mechanism (just
++         horizontal here) already relied on elsewhere in this launcher's
++         history for D-pad focus scrolling. -->
++    <HorizontalScrollView
 +        android:id="@+id/content_preview_channels"
-+        android:layout_width="wrap_content"
++        android:layout_width="match_parent"
 +        android:layout_height="wrap_content"
-+        android:orientation="horizontal"
-+        android:visibility="gone" />
++        android:scrollbars="none"
++        android:clipToPadding="false"
++        android:clipChildren="false"
++        android:visibility="gone">
++
++        <LinearLayout
++            android:id="@+id/content_preview_channels_row"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:orientation="horizontal" />
++    </HorizontalScrollView>
 +
 +    <LinearLayout
 +        android:id="@+id/content_preview_app_card"

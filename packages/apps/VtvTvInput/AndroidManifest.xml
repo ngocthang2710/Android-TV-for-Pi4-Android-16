@@ -30,10 +30,18 @@
             </intent-filter>
         </activity>
 
+        <!-- exported=true: the launcher's content_preview (see
+             TvSampleLeanbackLauncher's LauncherActivity) launches this
+             directly with EXTRA_CHANNEL_NUMBER to tune a specific VTV
+             channel from its clickable channel-preview tiles, without
+             going through VtvChannelListActivity's grid first. No new
+             attack surface: the only input is a channel number string,
+             same data VtvChannelListActivity already passes it from
+             inside this app. -->
         <activity
             android:name=".VtvPlayerActivity"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
-            android:exported="false" />
+            android:exported="true" />
 
         <!-- TvInputService setup hook: launched by TvProvision/Live Channels
              with EXTRA_INPUT_ID, not meant to be a user-visible app icon. -->
