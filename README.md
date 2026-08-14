@@ -189,6 +189,88 @@ Verified on real hardware end to end: `DPAD_UP` from the app row reaches
 the tiles, `DPAD_RIGHT` x7 auto-scrolls from VTV2 to VTV9, `DPAD_CENTER`
 tunes the exact channel tapped -- no crash, no `SecurityException`.
 
+#### "Recently Opened": a real usage-history row
+Still more empty middle after all of the above. Several other smart TV
+home screens (Roku, Fire TV, LG webOS) fill their own with a "recent"/
+"continue" row backed by actual usage history -- this does the same,
+using `UsageStatsManager`, not a fabricated recommendation list.
+
+- `PACKAGE_USAGE_STATS` granted as a **privileged permission**
+  (`com.example.sampleleanbacklauncher.xml`, this app is already
+  priv-app), not the "Usage access" Settings toggle a non-privileged app
+  would need -- this device has no reliable way to walk a user through
+  that dialog at first boot (no remote/keyboard by default, same
+  reasoning as the Wi-Fi SSID fix's `ACCESS_FINE_LOCATION` grant below).
+  Lighter to apply than a full re-flash: build the launcher, `adb root` +
+  `adb remount`, push the rebuilt privapp-permissions XML to
+  `/product/etc/permissions/`, `adb install -r` the new APK, then a plain
+  `adb reboot` (not a full system re-flash) is enough for
+  `PackageManagerService` to pick up the new allowlist entry.
+- Queries the last 14 days, sorted by most-recently-used, de-duplicated
+  by package, resolved to a real icon + launch `Intent` via
+  `PackageManager` -- entries with no resolvable launch intent (not
+  visible per the `<queries>` block, or no launcher activity at all) are
+  naturally filtered out rather than shown broken. Re-queried every
+  `onResume()`, hidden entirely if empty or if the permission somehow
+  isn't in effect (falls back gracefully, doesn't crash).
+- Tiles are clickable/`DPAD_CENTER`-able and relaunch the real app.
+
+**Bug found immediately after adding this**: initial D-pad focus (and
+therefore the hero title/backdrop, which only updates from an
+`onItemFocused()` callback the app row fires) got stuck on its default
+state, because this row's data loads synchronously in `onResume()` while
+the app row's own data loads asynchronously via `LoaderManager` -- this
+row's tiles ended up as the first focusable *and already-populated*
+content in the window, stealing initial focus before the app row was
+ready. Fixed by having the app row's `AppFragment` explicitly
+`requestFocus()` itself the first time its own data actually arrives,
+regardless of what raced ahead of it.
+
+**Second bug, caught by the user immediately after**: adding this row
+(plus content_preview) pushed `bottom_stack` taller, and the hero title
+text -- sized for when there was only one row below it -- started
+overlapping "Recently Opened". Measured with `uiautomator dump` instead
+of guessing again: a ~194px gap sat unused between the top bar and the
+hero text; the fix was to shrink `hero_height` back toward its original
+value so the text moves up into that space, not to shrink the new
+content further.
+
+| | |
+|---|---|
+| ![Recently Opened, multiple real apps](docs/screenshots/content-preview-09-recently-opened-multiple.png) | Real order: most-recently-opened first (Spotify, then Live Channels here), clickable to relaunch. |
+| ![No more overlap](docs/screenshots/content-preview-10-no-overlap-fixed.png) | After the hero_height fix: hero title, "Recently Opened", and the app row title all readable, no overlap. |
+
+Verified on real hardware: `dumpsys package` confirmed
+`PACKAGE_USAGE_STATS: granted=true` after reboot; opening Live Channels,
+then YouTube, then Spotify and returning home showed them in exactly
+that most-recent-first order; `DPAD_UP` from the app row reaches this
+row, `DPAD_CENTER` on a tile relaunches the real app (confirmed via
+`dumpsys window`'s `mCurrentFocus`); no crash.
+
+#### Status panel: real Wi-Fi + storage, and VTV tiles spanning full width
+Still empty on the right side of the hero region. Two more real-data
+additions, in the same "reference other smart TV home screens" spirit:
+
+- **`status_panel.xml`**, top-right: real Wi-Fi network name + signal
+  icon (read the exact same way `NetworkLaunchItem` already does
+  elsewhere in this launcher, not a second implementation) and real
+  free/total storage via `StatFs` -- matching the small "quick status"
+  widgets Samsung Tizen/LG webOS show on their own home screens.
+  Re-read every `onResume()`.
+- **VTV channel tiles now span the row's full width** with equal
+  `layout_weight`, instead of sitting as a small scrollable cluster on
+  the left -- user feedback was that this still left too much of the
+  screen unused. All 9 fit on-screen at once now, nothing to scroll.
+
+| | |
+|---|---|
+| ![Status panel](docs/screenshots/content-preview-11-status-panel.png) | Real Wi-Fi SSID + signal, real "9 GB free of 10 GB". |
+| ![VTV tiles full width](docs/screenshots/content-preview-12-vtv-full-width.png) | All 9 channels visible at once, spanning nearly the full screen width. |
+
+Verified on real hardware: status panel shows the actual connected
+network name and actual free/used storage; VTV row shows all 9 channels
+simultaneously with no scrolling needed; no crash.
+
 ## Feature: YouTube
 
 ### What it does

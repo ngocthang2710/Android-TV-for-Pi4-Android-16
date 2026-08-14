@@ -1,8 +1,30 @@
+diff --git a/TvSampleLeanbackLauncher/com.example.sampleleanbacklauncher.xml b/TvSampleLeanbackLauncher/com.example.sampleleanbacklauncher.xml
+index 3e0284b..7883262 100644
+--- a/TvSampleLeanbackLauncher/com.example.sampleleanbacklauncher.xml
++++ b/TvSampleLeanbackLauncher/com.example.sampleleanbacklauncher.xml
+@@ -17,5 +17,10 @@
+ <permissions>
+     <privapp-permissions package="com.example.sampleleanbacklauncher">
+         <permission name="android.permission.ACCESS_NOTIFICATIONS"/>
++        <!-- For the "Recently Opened" content_preview row (real usage
++             data via UsageStatsManager), not a fabricated recommendation
++             list. Privileged-permission grant, not a runtime dialog;
++             see LauncherActivity#queryRecentlyOpenedApps(). -->
++        <permission name="android.permission.PACKAGE_USAGE_STATS"/>
+     </privapp-permissions>
+ </permissions>
 diff --git a/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml b/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
-index 070967b..24ac12e 100644
+index 070967b..e8edf65 100644
 --- a/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
 +++ b/TvSampleLeanbackLauncher/src/main/AndroidManifest.xml
-@@ -21,9 +21,40 @@
+@@ -15,15 +15,54 @@
+   -->
+ 
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
+     package="com.example.sampleleanbacklauncher">
+ 
+     <!-- ACCESS_WIFI_STATE and ACCESS_NETWORK_STATE are used for updating the network settings entry icon -->
      <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
      <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
      <uses-permission android:name="android.permission.ACCESS_NOTIFICATIONS" />
@@ -11,6 +33,13 @@ index 070967b..24ac12e 100644
 +         silently via a device-level default-permissions exception since this
 +         launcher has no UI to prompt the user through the runtime dialog. -->
 +    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
++    <!-- "Recently Opened" content_preview row: real per-app usage data via
++         UsageStatsManager, not a fabricated recommendation list. A
++         privileged-permission grant via com.example.sampleleanbacklauncher.xml
++         (this app is already priv-app), not the user-facing "Usage access"
++         Settings toggle a non-privileged app would need. -->
++    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
++        tools:ignore="ProtectedPermissions" />
  
      <uses-feature android:name="android.software.leanback" android:required="true" />
  
@@ -44,27 +73,38 @@ index 070967b..24ac12e 100644
          android:allowBackup="true"
          android:icon="@mipmap/ic_launcher"
 diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-index b14ac59..9dd737e 100644
+index b14ac59..5f3da22 100644
 --- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
 +++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/LauncherActivity.java
-@@ -17,42 +17,381 @@
+@@ -17,46 +17,425 @@
  package com.example.sampleleanbacklauncher;
  
  import android.app.Activity;
++import android.app.usage.UsageStats;
++import android.app.usage.UsageStatsManager;
 +import android.content.ActivityNotFoundException;
 +import android.content.ComponentName;
++import android.content.Context;
  import android.content.Intent;
++import android.content.pm.PackageManager;
 +import android.graphics.RenderEffect;
 +import android.graphics.Shader;
 +import android.graphics.Typeface;
 +import android.graphics.drawable.Drawable;
++import android.net.ConnectivityManager;
++import android.net.NetworkInfo;
++import android.net.wifi.WifiInfo;
++import android.net.wifi.WifiManager;
 +import android.os.Build;
  import android.os.Bundle;
++import android.os.Environment;
++import android.os.StatFs;
 +import android.provider.Settings;
 +import android.util.Log;
 +import android.view.Gravity;
 +import android.view.View;
 +import android.view.ViewGroup;
++import android.widget.FrameLayout;
 +import android.widget.ImageView;
 +import android.widget.LinearLayout;
 +import android.widget.TextView;
@@ -73,6 +113,12 @@ index b14ac59..9dd737e 100644
  import com.example.sampleleanbacklauncher.apps.AppFragment;
 -import com.example.sampleleanbacklauncher.search.SearchFragment;
 +import com.example.sampleleanbacklauncher.apps.LaunchItem;
++
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
 +
 +public class LauncherActivity extends Activity implements AppFragment.OnItemFocusedListener {
 +    private static final String TAG = "LauncherActivity";
@@ -114,6 +160,11 @@ index b14ac59..9dd737e 100644
 +    private static final String[] VTV_CHANNEL_NAMES = {
 +        "VTV1", "VTV2", "VTV3", "VTV4", "VTV5", "VTV6", "VTV7", "VTV8", "VTV9",
 +    };
++
++    // recent_apps_row.xml: how far back to look for "recently opened"
++    // (UsageStatsManager) and how many to show.
++    private static final long RECENT_APPS_LOOKBACK_MS = TimeUnit.DAYS.toMillis(14);
++    private static final int RECENT_APPS_MAX_COUNT = 8;
  
 -public class LauncherActivity extends Activity {
      private SystemUpdateChecker mSystemUpdateChecker;
@@ -126,10 +177,15 @@ index b14ac59..9dd737e 100644
 +    private View mHeroBackdropScrim;
 +    private View mHeroBackdropScrimHorizontal;
 +    private View mContentPreview;
-+    private View mContentPreviewChannels;
++    private LinearLayout mContentPreviewChannels;
 +    private View mContentPreviewAppCard;
 +    private ImageView mContentPreviewAppIcon;
 +    private TextView mContentPreviewAppLabel;
++    private View mRecentAppsContainer;
++    private LinearLayout mRecentAppsRow;
++    private TextView mStatusPanelNetworkLabel;
++    private ImageView mStatusPanelNetworkIcon;
++    private TextView mStatusPanelStorageLabel;
 +
      @Override
      protected void onCreate(Bundle savedInstanceState) {
@@ -157,6 +213,11 @@ index b14ac59..9dd737e 100644
 +        mContentPreviewAppCard = findViewById(R.id.content_preview_app_card);
 +        mContentPreviewAppIcon = findViewById(R.id.content_preview_app_icon);
 +        mContentPreviewAppLabel = findViewById(R.id.content_preview_app_label);
++        mRecentAppsContainer = findViewById(R.id.recent_apps_container);
++        mRecentAppsRow = findViewById(R.id.recent_apps_row);
++        mStatusPanelNetworkLabel = findViewById(R.id.status_panel_network_label);
++        mStatusPanelNetworkIcon = findViewById(R.id.status_panel_network_icon);
++        mStatusPanelStorageLabel = findViewById(R.id.status_panel_storage_label);
 +        populateVtvChannelPreview();
 +
 +        setUpTopBar();
@@ -401,9 +462,14 @@ index b14ac59..9dd737e 100644
 +     * plain default focus search (nearest focusable view above), same as
 +     * how the app row already reaches the top bar; no custom
 +     * nextFocusUp/Down wiring needed.
++     *
++     * <p>Equal-weight LayoutParams (width=0, weight=1), not wrap_content:
++     * user feedback was that a small, left-aligned, scrollable cluster
++     * left too much of the screen's width empty -- these now stretch to
++     * fill content_preview_channels' full match_parent width between them,
++     * matching the reference's row spanning nearly edge to edge.
 +     */
 +    private void populateVtvChannelPreview() {
-+        final LinearLayout row = findViewById(R.id.content_preview_channels_row);
 +        final float density = getResources().getDisplayMetrics().density;
 +        for (int i = 0; i < VTV_CHANNEL_NAMES.length; i++) {
 +            final String name = VTV_CHANNEL_NAMES[i];
@@ -415,9 +481,8 @@ index b14ac59..9dd737e 100644
 +            tile.setTextColor(getColor(R.color.hero_title_text_color));
 +            tile.setGravity(Gravity.CENTER);
 +            tile.setBackground(getDrawable(R.drawable.content_preview_card_background));
-+            final int paddingH = Math.round(28 * density);
 +            final int paddingV = Math.round(20 * density);
-+            tile.setPadding(paddingH, paddingV, paddingH, paddingV);
++            tile.setPadding(0, paddingV, 0, paddingV);
 +            tile.setFocusable(true);
 +            tile.setClickable(true);
 +            tile.setOnFocusChangeListener((v, hasFocus) -> {
@@ -427,24 +492,229 @@ index b14ac59..9dd737e 100644
 +                tile.setTextColor(getColor(hasFocus
 +                        ? R.color.top_bar_active_pill_text_color
 +                        : R.color.hero_title_text_color));
-+                v.animate().scaleX(hasFocus ? 1.08f : 1f).scaleY(hasFocus ? 1.08f : 1f)
++                v.animate().scaleX(hasFocus ? 1.04f : 1f).scaleY(hasFocus ? 1.04f : 1f)
 +                        .setDuration(150).start();
 +            });
 +            tile.setOnClickListener(v -> startActivitySafely(new Intent()
 +                    .setComponent(VTV_PLAYER_COMPONENT)
 +                    .putExtra(VTV_EXTRA_CHANNEL_NUMBER, channelNumber)));
 +            final LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-+            params.setMarginEnd(Math.round(12 * density));
-+            row.addView(tile, params);
++                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
++            if (i < VTV_CHANNEL_NAMES.length - 1) {
++                params.setMarginEnd(Math.round(10 * density));
++            }
++            mContentPreviewChannels.addView(tile, params);
 +        }
 +    }
 +
      @Override
      protected void onResume() {
          super.onResume();
+         findViewById(R.id.launcher_container).animate().alpha(1f);
++        refreshRecentlyOpenedApps();
++        refreshStatusPanel();
+ 
+         Intent intent = mSystemUpdateChecker.getSystemUpdateCheckerIntent();
+         if (intent != null) {
+@@ -64,6 +443,196 @@ public class LauncherActivity extends Activity {
+         }
+     }
+ 
++    /**
++     * recent_apps_row.xml: real "Recently Opened" apps, the same kind of
++     * row several other smart TV home screens (Roku, Fire TV, webOS) use
++     * to fill their own middle area -- but backed by this device's actual
++     * {@link UsageStatsManager} history, not fabricated content.
++     * Re-queried on every onResume() (not just onCreate()) since the
++     * ordering changes every time the user opens something and comes back
++     * home.
++     *
++     * <p>Needs {@code android.permission.PACKAGE_USAGE_STATS}, granted as
++     * a privileged permission (this app is already priv-app; see
++     * com.example.sampleleanbacklauncher.xml) rather than the "Usage
++     * access" Settings toggle a non-privileged app would need -- this
++     * device has no reliable way to walk a user through that dialog at
++     * first boot (no remote/keyboard by default, same reasoning as the
++     * Wi-Fi SSID fix's ACCESS_FINE_LOCATION grant). If that permission
++     * grant doesn't take effect for some reason, queryUsageStats()
++     * throws/returns null and this row just silently stays hidden rather
++     * than crashing the launcher.
++     */
++    private void refreshRecentlyOpenedApps() {
++        final List<LaunchInfo> recents = queryRecentlyOpenedApps();
++        mRecentAppsRow.removeAllViews();
++        if (recents.isEmpty()) {
++            mRecentAppsContainer.setVisibility(View.GONE);
++            return;
++        }
++        mRecentAppsContainer.setVisibility(View.VISIBLE);
++        final float density = getResources().getDisplayMetrics().density;
++        final int tileSize = getResources().getDimensionPixelSize(R.dimen.recent_apps_tile_size);
++        final int iconSize = getResources().getDimensionPixelSize(R.dimen.recent_apps_icon_size);
++        for (LaunchInfo info : recents) {
++            final FrameLayout tile = new FrameLayout(this);
++            tile.setBackground(getDrawable(R.drawable.circular_tile_background));
++            tile.setFocusable(true);
++            tile.setClickable(true);
++            tile.setOnFocusChangeListener((v, hasFocus) -> {
++                tile.setBackground(getDrawable(hasFocus
++                        ? R.drawable.circular_tile_background_focused
++                        : R.drawable.circular_tile_background));
++                v.animate().scaleX(hasFocus ? 1.08f : 1f).scaleY(hasFocus ? 1.08f : 1f)
++                        .setDuration(150).start();
++            });
++            tile.setOnClickListener(v -> startActivitySafely(info.intent));
++
++            final ImageView icon = new ImageView(this);
++            icon.setImageDrawable(info.icon);
++            final FrameLayout.LayoutParams iconParams =
++                    new FrameLayout.LayoutParams(iconSize, iconSize);
++            iconParams.gravity = Gravity.CENTER;
++            tile.addView(icon, iconParams);
++
++            final LinearLayout.LayoutParams tileParams =
++                    new LinearLayout.LayoutParams(tileSize, tileSize);
++            tileParams.setMarginEnd(Math.round(10 * density));
++            mRecentAppsRow.addView(tile, tileParams);
++        }
++    }
++
++    /**
++     * @return real recently-opened apps (most-recent first), excluding
++     *     this launcher itself and de-duplicated by package, capped at
++     *     RECENT_APPS_MAX_COUNT. Empty (never null) if usage-stats access
++     *     isn't available for any reason.
++     */
++    private List<LaunchInfo> queryRecentlyOpenedApps() {
++        final List<LaunchInfo> result = new ArrayList<>();
++        final UsageStatsManager usageStatsManager =
++                (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
++        if (usageStatsManager == null) {
++            return result;
++        }
++        final long end = System.currentTimeMillis();
++        final long start = end - RECENT_APPS_LOOKBACK_MS;
++        final List<UsageStats> stats;
++        try {
++            stats = usageStatsManager.queryUsageStats(
++                    UsageStatsManager.INTERVAL_BEST, start, end);
++        } catch (SecurityException e) {
++            // Permission grant didn't take effect -- see this method's
++            // javadoc. Not fatal, the row just stays hidden.
++            Log.w(TAG, "No usage stats access, hiding Recently Opened", e);
++            return result;
++        }
++        if (stats == null) {
++            return result;
++        }
++        stats.sort((a, b) -> Long.compare(b.getLastTimeUsed(), a.getLastTimeUsed()));
++
++        final PackageManager packageManager = getPackageManager();
++        final Set<String> seenPackages = new HashSet<>();
++        for (UsageStats usageStats : stats) {
++            if (result.size() >= RECENT_APPS_MAX_COUNT) {
++                break;
++            }
++            final String packageName = usageStats.getPackageName();
++            if (packageName.equals(getPackageName()) || !seenPackages.add(packageName)) {
++                continue;
++            }
++            // Resolves to null for anything not visible to this app (see
++            // the <queries> block in AndroidManifest.xml) or with no
++            // launcher entry point at all -- naturally filters usage-stats
++            // entries down to real, actually-relaunchable TV apps.
++            final Intent launchIntent = packageManager.getLaunchIntentForPackage(packageName);
++            if (launchIntent == null) {
++                continue;
++            }
++            final Drawable icon;
++            try {
++                icon = packageManager.getApplicationIcon(packageName);
++            } catch (PackageManager.NameNotFoundException e) {
++                continue;
++            }
++            result.add(new LaunchInfo(icon, launchIntent));
++        }
++        return result;
++    }
++
++    /** Just enough per-item state for a recent_apps_row.xml tile. */
++    private static final class LaunchInfo {
++        final Drawable icon;
++        final Intent intent;
++
++        LaunchInfo(Drawable icon, Intent intent) {
++            this.icon = icon;
++            this.intent = intent;
++        }
++    }
++
++    /**
++     * status_panel.xml: real Wi-Fi and storage numbers, filling the empty
++     * right side of the hero region -- the same kind of "quick status"
++     * widget several other smart TV home screens (Samsung Tizen, LG
++     * webOS) show on their own home screen. Wi-Fi is read the exact same
++     * way {@link com.example.sampleleanbacklauncher.apps.NetworkLaunchItem}
++     * already does elsewhere in this launcher (same permission, same
++     * signal-level icons), not a second implementation of the same thing.
++     * Re-read on every onResume() since both numbers can change any time.
++     */
++    private void refreshStatusPanel() {
++        final ConnectivityManager connectivityManager = getSystemService(ConnectivityManager.class);
++        final NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
++        if (networkInfo != null && networkInfo.getType() == ConnectivityManager.TYPE_WIFI
++                && networkInfo.isConnected()) {
++            final WifiInfo wifiInfo = getSystemService(WifiManager.class).getConnectionInfo();
++            mStatusPanelNetworkLabel.setText(removeDoubleQuotes(wifiInfo.getSSID()));
++            final int signalLevel = WifiManager.calculateSignalLevel(wifiInfo.getRssi(), 5);
++            mStatusPanelNetworkIcon.setImageDrawable(getDrawable(getWifiIconRes(signalLevel)));
++        } else {
++            mStatusPanelNetworkLabel.setText(getString(R.string.network_settings_disconnected));
++            mStatusPanelNetworkIcon.setImageDrawable(
++                    getDrawable(R.drawable.wifi_not_connected_launcher));
++        }
++
++        final StatFs storageStats = new StatFs(Environment.getDataDirectory().getPath());
++        final long totalGb = bytesToGb(storageStats.getTotalBytes());
++        final long freeGb = bytesToGb(storageStats.getAvailableBytes());
++        mStatusPanelStorageLabel.setText(
++                getString(R.string.status_panel_storage_format, freeGb, totalGb));
++    }
++
++    private static int getWifiIconRes(int signalLevel) {
++        switch (signalLevel) {
++            case 4: return R.drawable.wifi_active_4_launcher;
++            case 3: return R.drawable.wifi_active_3_launcher;
++            case 2: return R.drawable.wifi_active_2_launcher;
++            case 1: return R.drawable.wifi_active_1_launcher;
++            case 0:
++            default: return R.drawable.wifi_active_0_launcher;
++        }
++    }
++
++    private static long bytesToGb(long bytes) {
++        return bytes / (1024L * 1024L * 1024L);
++    }
++
++    // Same helper NetworkLaunchItem has privately; WifiInfo#getSSID()
++    // returns the network name wrapped in literal double quotes for a
++    // plain (non-hex) SSID.
++    private static String removeDoubleQuotes(String string) {
++        if (string == null) {
++            return null;
++        }
++        final int length = string.length();
++        if (length > 1 && string.charAt(0) == '"' && string.charAt(length - 1) == '"') {
++            return string.substring(1, length - 1);
++        }
++        return string;
++    }
++
+     @Override
+     protected void onPause() {
+         super.onPause();
 diff --git a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
-index 59897d2..c3636f8 100644
+index 59897d2..e08a9f7 100644
 --- a/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
 +++ b/TvSampleLeanbackLauncher/src/main/java/com/example/sampleleanbacklauncher/apps/AppFragment.java
 @@ -29,7 +29,9 @@ import android.content.Loader;
@@ -498,7 +768,7 @@ index 59897d2..c3636f8 100644
  
      private static final int ITEM_LOADER_ID = 1;
      private static final int NOTIFS_COUNT_LOADER_ID = 2;
-@@ -78,8 +96,16 @@ public class AppFragment extends Fragment {
+@@ -78,7 +96,28 @@ public class AppFragment extends Fragment {
      @RowType
      private String mRowType;
  
@@ -508,14 +778,26 @@ index 59897d2..c3636f8 100644
 +    private boolean mCircularStyle;
 +
      private AppAdapter mAdapter;
- 
++    private RecyclerView mList;
++    // True once this row has requested D-pad focus for itself the first
++    // time its (asynchronously-loaded, see ItemLoaderCallbacks) data
++    // becomes non-empty -- see updateList(). Without this, initial window
++    // focus went wherever else was already focusable and visible at
++    // layout time, e.g. content_preview's VTV tiles or (once real usage
++    // data made it visible synchronously in LauncherActivity#onResume(),
++    // ahead of this row's own async load) recent_apps_row -- confirmed
++    // on-device as a real regression once recent_apps_row was added: the
++    // hero title/backdrop got stuck on their default state because
++    // whichever view actually ended up with initial focus never fires
++    // OnItemFocusedListener.
++    private boolean mHasRequestedInitialFocus;
++
 +    @Nullable
 +    private OnItemFocusedListener mItemFocusedListener;
-+
+ 
      private LaunchItemsManager mLaunchItemsManager;
      private final ServiceConnection mLaunchItemsServiceConnection = new ServiceConnection() {
-         @Override
-@@ -95,19 +121,50 @@ public class AppFragment extends Fragment {
+@@ -95,19 +134,50 @@ public class AppFragment extends Fragment {
      };
  
      public static AppFragment newInstance(@RowType String rowType) {
@@ -567,7 +849,7 @@ index 59897d2..c3636f8 100644
          final Context context = getContext();
          context.bindService(new Intent(context, LaunchItemsManager.class),
                  mLaunchItemsServiceConnection, Context.BIND_AUTO_CREATE);
-@@ -124,11 +181,21 @@ public class AppFragment extends Fragment {
+@@ -124,11 +194,22 @@ public class AppFragment extends Fragment {
          final TextView rowTitle = (TextView) root.findViewById(R.id.row_title);
          rowTitle.setText(getRowTitle());
          final RecyclerView list = (RecyclerView) root.findViewById(android.R.id.list);
@@ -579,6 +861,7 @@ index 59897d2..c3636f8 100644
 +            params.height = getResources().getDimensionPixelSize(R.dimen.circular_row_item_height);
 +            list.setLayoutParams(params);
 +        }
++        mList = list;
          mAdapter = new AppAdapter();
          getLoaderManager().initLoader(ITEM_LOADER_ID, null, new ItemLoaderCallbacks());
          list.setAdapter(mAdapter);
@@ -590,7 +873,7 @@ index 59897d2..c3636f8 100644
              getLoaderManager().initLoader(NOTIFS_COUNT_LOADER_ID, null,
                      new NotifsCountLoaderCallbacks());
          }
-@@ -144,6 +211,19 @@ public class AppFragment extends Fragment {
+@@ -144,6 +225,19 @@ public class AppFragment extends Fragment {
      }
  
      private @IdRes int getRootViewId() {
@@ -610,7 +893,7 @@ index 59897d2..c3636f8 100644
          switch (mRowType) {
              case ROW_TYPE_APPS:
                  return R.id.apps_row;
-@@ -156,6 +236,9 @@ public class AppFragment extends Fragment {
+@@ -156,6 +250,9 @@ public class AppFragment extends Fragment {
      }
  
      public CharSequence getRowTitle() {
@@ -620,7 +903,23 @@ index 59897d2..c3636f8 100644
          switch (mRowType) {
              case ROW_TYPE_APPS:
                  return getText(R.string.apps_row_title);
-@@ -225,17 +308,49 @@ public class AppFragment extends Fragment {
+@@ -194,6 +291,15 @@ public class AppFragment extends Fragment {
+         } finally {
+             items.endBatchedUpdates();
+         }
++
++        // See mHasRequestedInitialFocus's comment: claims initial D-pad
++        // focus for this row the first time it actually has content,
++        // deterministically, instead of leaving it to whatever else
++        // happened to be focusable first.
++        if (!mHasRequestedInitialFocus && items.size() > 0) {
++            mHasRequestedInitialFocus = true;
++            mList.requestFocus();
++        }
+     }
+ 
+     void onItemClicked(int adapterPosition) {
+@@ -225,17 +331,49 @@ public class AppFragment extends Fragment {
          }
  
          public void bind(LaunchItem launchItem) {
@@ -679,7 +978,7 @@ index 59897d2..c3636f8 100644
              launchItemIcon.setImageDrawable(launchItem.getIcon());
          }
  
-@@ -277,7 +392,9 @@ public class AppFragment extends Fragment {
+@@ -277,7 +415,9 @@ public class AppFragment extends Fragment {
          @Override
          public AppViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
              final LayoutInflater inflater = LayoutInflater.from(parent.getContext());
@@ -690,7 +989,7 @@ index 59897d2..c3636f8 100644
          }
  
          @Override
-@@ -379,6 +496,17 @@ public class AppFragment extends Fragment {
+@@ -379,6 +519,17 @@ public class AppFragment extends Fragment {
                      LocalBroadcastManager.getInstance(getContext()).registerReceiver(mReceiver,
                              new IntentFilter(LaunchItemsManager.ACTION_SETTINGS_LIST_INVALIDATED));
                      break;
@@ -708,7 +1007,7 @@ index 59897d2..c3636f8 100644
              }
              // Force a load to pick up any changes since we stopped listening
              onContentChanged();
-@@ -408,6 +536,10 @@ public class AppFragment extends Fragment {
+@@ -408,6 +559,10 @@ public class AppFragment extends Fragment {
                          return mLaunchItemsManager.getGameItems();
                      case ROW_TYPE_SETTINGS:
                          return mLaunchItemsManager.getSettingsItems();
@@ -719,7 +1018,7 @@ index 59897d2..c3636f8 100644
                      default:
                          throw new IllegalStateException("Unknown row type");
                  }
-@@ -415,6 +547,38 @@ public class AppFragment extends Fragment {
+@@ -415,6 +570,38 @@ public class AppFragment extends Fragment {
                  return null;
              }
          }
@@ -1382,10 +1681,10 @@ index 0000000..e50330b
 +</shape>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
 new file mode 100644
-index 0000000..b045946
+index 0000000..ce0bf07
 --- /dev/null
 +++ b/TvSampleLeanbackLauncher/src/main/res/layout/content_preview.xml
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,90 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  ~ Copyright (C) 2026 The Android Open Source Project
@@ -1426,36 +1725,27 @@ index 0000000..b045946
 +    android:id="@+id/content_preview"
 +    android:layout_width="match_parent"
 +    android:layout_height="wrap_content"
-+    android:layout_marginBottom="24dp"
++    android:layout_marginBottom="16dp"
 +    android:paddingStart="@dimen/overscan_horizontal"
 +    android:paddingEnd="@dimen/overscan_horizontal"
 +    android:clipChildren="false"
 +    android:clipToPadding="false"
 +    android:visibility="gone">
 +
-+    <!-- HorizontalScrollView, not a bare LinearLayout: at the larger tile
-+         size used for these (see LauncherActivity#populateVtvChannelPreview()),
-+         all 9 VTV tiles don't fit on one 1920px-wide screen; confirmed
-+         on-device, VTV8/9 were pushed off-screen with no way to reach
-+         them. A focused child that's out of view auto-scrolls into frame
-+         via this view's own default behavior, same mechanism (just
-+         horizontal here) already relied on elsewhere in this launcher's
-+         history for D-pad focus scrolling. -->
-+    <HorizontalScrollView
++    <!-- match_parent + equal-weight children (see
++         LauncherActivity#populateVtvChannelPreview()), not a scrollable
++         wrap_content row: user asked for this to actually use the empty
++         width on the right side of the screen ("trải rộng gần hết chiều
++         ngang màn hình") rather than sit as a small scrollable cluster on
++         the left. All 9 tiles are always on-screen at once now, so
++         there's nothing to scroll and no off-screen tile to worry about
++         reaching by D-pad. -->
++    <LinearLayout
 +        android:id="@+id/content_preview_channels"
 +        android:layout_width="match_parent"
 +        android:layout_height="wrap_content"
-+        android:scrollbars="none"
-+        android:clipToPadding="false"
-+        android:clipChildren="false"
-+        android:visibility="gone">
-+
-+        <LinearLayout
-+            android:id="@+id/content_preview_channels_row"
-+            android:layout_width="wrap_content"
-+            android:layout_height="wrap_content"
-+            android:orientation="horizontal" />
-+    </HorizontalScrollView>
++        android:orientation="horizontal"
++        android:visibility="gone" />
 +
 +    <LinearLayout
 +        android:id="@+id/content_preview_app_card"
@@ -1696,10 +1986,10 @@ index 0000000..10f9254
 +        android:layout_gravity="center" />
 +</FrameLayout>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
-index 1b05005..bd366d4 100644
+index 1b05005..9c1b853 100644
 --- a/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
 +++ b/TvSampleLeanbackLauncher/src/main/res/layout/launcher.xml
-@@ -14,6 +14,25 @@
+@@ -14,6 +14,27 @@
    ~ See the License for the specific language governing permissions and
    ~ limitations under the License
    -->
@@ -1713,19 +2003,21 @@ index 1b05005..bd366d4 100644
 +          confirmed wrong on-device. See hero_banner.xml, which now only
 +          positions text over this, no image of its own.
 +       2. hero_banner.xml : title/subtitle text positioning.
-+       3. bottom_stack : content_preview (see content_preview.xml; real
-+          VTV channel lineup when VTV has focus, a generic icon+name card
-+          for every other app, never fabricated content) stacked directly
-+          above launcher_container (the app row), both pinned to the
-+          BOTTOM of the screen as one block. Used to be just
-+          launcher_container alone with content_preview not existing yet;
-+          the empty middle between the hero text and the app row is what
-+          content_preview now fills when something is focused.
-+       4. top_bar.xml : fixed nav bar, always on top. -->
++       3. status_panel.xml : real Wi-Fi/storage status card, top-right,
++          filling the empty right side of the hero region.
++       4. bottom_stack : recent_apps_row (real per-app usage data, see
++          recent_apps_row.xml) then content_preview (see
++          content_preview.xml; real VTV channel lineup when VTV has
++          focus, a generic icon+name card for every other app, never
++          fabricated content) then launcher_container (the app row), all
++          pinned to the BOTTOM of the screen as one block. Used to be just
++          launcher_container alone; the empty middle between the hero
++          text and the app row is what these two rows now fill.
++       5. top_bar.xml : fixed nav bar, always on top. -->
  <FrameLayout
      xmlns:android="http://schemas.android.com/apk/res/android"
      android:id="@+id/mostly_transparent_wrapper"
-@@ -21,21 +40,67 @@
+@@ -21,21 +42,71 @@
      android:layout_height="match_parent"
      android:clipToPadding="false"
      android:clipChildren="false">
@@ -1773,6 +2065,8 @@ index 1b05005..bd366d4 100644
 +
 +    <include layout="@layout/hero_banner" />
 +
++    <include layout="@layout/status_panel" />
++
 +    <LinearLayout
 +        android:id="@+id/bottom_stack"
 +        android:layout_width="match_parent"
@@ -1784,6 +2078,8 @@ index 1b05005..bd366d4 100644
          android:clipChildren="false"
 -        android:scrollbars="none">
 +        android:clipToPadding="false">
++
++        <include layout="@layout/recent_apps_row" />
 +
 +        <include layout="@layout/content_preview" />
 +
@@ -1800,6 +2096,151 @@ index 1b05005..bd366d4 100644
 +
 +    <include layout="@layout/top_bar" />
  </FrameLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/recent_apps_row.xml b/TvSampleLeanbackLauncher/src/main/res/layout/recent_apps_row.xml
+new file mode 100644
+index 0000000..1c82f0c
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/recent_apps_row.xml
+@@ -0,0 +1,63 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Real "Recently Opened" row, matching the same pattern several other
++     smart TV home screens (Roku, Fire TV, webOS) use to fill their own
++     middle area: actual per-app usage data (UsageStatsManager), not a
++     fabricated content list; see
++     LauncherActivity#refreshRecentlyOpenedApps(). Sits above
++     content_preview.xml in bottom_stack, always shown once there's real
++     usage data (not focus-reactive like content_preview; "recently used"
++     isn't a property of whichever item currently has focus). Hidden
++     entirely if there's no usage data yet (e.g. right after first boot)
++     rather than showing an empty row. -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/recent_apps_container"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:orientation="vertical"
++    android:layout_marginBottom="12dp"
++    android:paddingStart="@dimen/overscan_horizontal"
++    android:paddingEnd="@dimen/overscan_horizontal"
++    android:clipChildren="false"
++    android:clipToPadding="false"
++    android:visibility="gone">
++
++    <TextView
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginBottom="6dp"
++        android:text="@string/recent_apps_title"
++        android:textSize="14sp"
++        android:textColor="@color/hero_subtitle_text_color" />
++
++    <HorizontalScrollView
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:scrollbars="none"
++        android:clipToPadding="false"
++        android:clipChildren="false">
++
++        <LinearLayout
++            android:id="@+id/recent_apps_row"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:orientation="horizontal"
++            android:clipChildren="false"
++            android:clipToPadding="false" />
++    </HorizontalScrollView>
++</LinearLayout>
+diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/status_panel.xml b/TvSampleLeanbackLauncher/src/main/res/layout/status_panel.xml
+new file mode 100644
+index 0000000..36bfc99
+--- /dev/null
++++ b/TvSampleLeanbackLauncher/src/main/res/layout/status_panel.xml
+@@ -0,0 +1,70 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License
++  -->
++
++<!-- Fills the empty right side of the hero region (the backdrop image
++     alone otherwise leaves this whole area visually inert) with a real
++     device-status card, matching the small "quick status" widgets several
++     other smart TV home screens (Samsung Tizen, LG webOS) show on their
++     own home screen; real Wi-Fi network/signal and storage numbers,
++     read the same way NetworkLaunchItem already does elsewhere in this
++     launcher, not invented content. See
++     LauncherActivity#refreshStatusPanel(). -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/status_panel"
++    android:layout_width="wrap_content"
++    android:layout_height="wrap_content"
++    android:layout_gravity="top|end"
++    android:layout_marginTop="96dp"
++    android:layout_marginEnd="@dimen/overscan_horizontal"
++    android:orientation="vertical"
++    android:gravity="end"
++    android:background="@drawable/content_preview_card_background"
++    android:paddingStart="24dp"
++    android:paddingEnd="24dp"
++    android:paddingTop="18dp"
++    android:paddingBottom="18dp"
++    android:clipChildren="false"
++    android:clipToPadding="false">
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:orientation="horizontal"
++        android:gravity="center_vertical">
++
++        <TextView
++            android:id="@+id/status_panel_network_label"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginEnd="10dp"
++            android:textSize="16sp"
++            android:textColor="@color/hero_subtitle_text_color" />
++
++        <ImageView
++            android:id="@+id/status_panel_network_icon"
++            android:layout_width="22dp"
++            android:layout_height="22dp" />
++    </LinearLayout>
++
++    <TextView
++        android:id="@+id/status_panel_storage_label"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="8dp"
++        android:textSize="16sp"
++        android:textColor="@color/hero_subtitle_text_color" />
++</LinearLayout>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/layout/top_bar.xml b/TvSampleLeanbackLauncher/src/main/res/layout/top_bar.xml
 new file mode 100644
 index 0000000..9d085eb
@@ -2072,10 +2513,10 @@ index b5d956b..2d079f8 100644
      <color name="notification_background">#FFCCCCCC</color>
      <color name="notification_heads_up_decorator">#1784d7</color>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml b/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
-index 8936f39..98ac19d 100644
+index 8936f39..d0e5647 100644
 --- a/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
 +++ b/TvSampleLeanbackLauncher/src/main/res/values/dimens.xml
-@@ -21,11 +21,96 @@
+@@ -21,11 +21,112 @@
  
      <dimen name="app_item_width">190dp</dimen>
      <dimen name="app_item_height">120dp</dimen>
@@ -2117,6 +2558,15 @@ index 8936f39..98ac19d 100644
 +         stack up into the hero subtitle text, confirmed on-device as a
 +         visible overlap. -->
 +    <dimen name="circular_row_item_height">92dp</dimen>
++
++    <!-- recent_apps_row.xml: deliberately smaller than circular_tile_size,
++         both for visual hierarchy (secondary row, smaller than the main
++         "Your Apps" row) and to help this row plus content_preview both
++         fit above the app row without pushing into the hero text;
++         confirmed on-device as a real overlap once this row was added
++         using circular_tile_size-sized icons. -->
++    <dimen name="recent_apps_tile_size">56dp</dimen>
++    <dimen name="recent_apps_icon_size">32dp</dimen>
 +
 +    <!-- Top bar (top_bar.xml): Search/Home/Apps tabs + Settings + clock,
 +         fixed above everything including the hero. Sizes below were
@@ -2163,10 +2613,17 @@ index 8936f39..98ac19d 100644
 +    <dimen name="top_bar_group_gap">48dp</dimen>
 +
 +    <!-- Hero region (hero_banner.xml), fixed above the scrolling rows.
-+         hero_height increased from 216dp: measured title block position in
-+         the reference sits lower, around 33%-44% of screen height, not
-+         21%-30%. -->
-+    <dimen name="hero_height">266dp</dimen>
++         Was bumped 216dp -> 266dp to match a reference screenshot's title
++         position when this launcher only had content_preview + the app
++         row below it (plenty of empty space to push the title down into).
++         Back to 216dp now that recent_apps_row (section 15) also sits in
++         that space: confirmed on-device via uiautomator bounds that
++         266dp left a ~194px empty gap between the top bar and the hero
++         text while the rows below it overlapped the hero text; there
++         wasn't more room to give, the existing room was just positioned
++         wrong. User: "đẩy nó lên vào chỗ trống... không để chỗ nào trống
++         trên màn hình". -->
++    <dimen name="hero_height">216dp</dimen>
 +    <dimen name="hero_fallback_icon_size">96dp</dimen>
 +    <dimen name="hero_title_text_size">36sp</dimen>
 +    <dimen name="hero_subtitle_text_size">18sp</dimen>
@@ -2186,10 +2643,10 @@ index 41a3670..bf1ba1a 100644
 +    <item type="id" name="your_apps_row"/>
  </resources>
 diff --git a/TvSampleLeanbackLauncher/src/main/res/values/strings.xml b/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
-index 86d3d79..753ed85 100644
+index 86d3d79..4dbe987 100644
 --- a/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
 +++ b/TvSampleLeanbackLauncher/src/main/res/values/strings.xml
-@@ -16,12 +16,27 @@
+@@ -16,11 +16,29 @@
  
  <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
      <string name="app_name">Sample Leanback Launcher</string>
@@ -2198,9 +2655,12 @@ index 86d3d79..753ed85 100644
      <string name="games_row_title">Games</string>
      <string name="settings_row_title">Settings</string>
 +    <string name="your_apps_row_title">Your Apps</string>
++    <string name="recent_apps_title">Recently Opened</string>
  
      <string name="network_settings_disconnected">Network Settings</string>
- 
++    <!-- status_panel.xml: real free/total storage, e.g. "48 GB free of 64 GB". -->
++    <string name="status_panel_storage_format">%1$d GB free of %2$d GB</string>
++
 +    <!-- Top bar (top_bar.xml) -->
 +    <string name="top_bar_account_content_description">Account</string>
 +    <string name="top_bar_search">Search</string>
@@ -2214,7 +2674,6 @@ index 86d3d79..753ed85 100644
 +         match the reference screenshot's literal brand text here instead
 +         of this launcher's own app_name. -->
 +    <string name="top_bar_brand_text">Google TV</string>
-+
+ 
      <string name="app_unavailable">Application unavailable</string>
  
-     <string name="search_click_to_speak">Click to speak</string>
